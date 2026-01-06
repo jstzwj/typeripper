@@ -72,3 +72,14 @@ export type {
   TypeWarning,
   TypeWarningKind,
 } from './analysis.js';
+
+// Annotation types
+export type {
+  TypeAnnotation,
+  TypeAnnotationResult,
+  AnnotationKind,
+  InferenceError,
+  ScopeInfo,
+  TypeMap,
+  OutputOptions,
+} from './annotation.js';
