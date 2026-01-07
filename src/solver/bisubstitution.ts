@@ -372,7 +372,7 @@ function isConcreteType(type: PolarType): boolean {
  * For example, if we have bound = τ28 | instance,
  * we extract instance (the concrete part).
  *
- * This is a simplification for output purposes - we prefer showing
+ * This is essential for producing readable type output - we prefer showing
  * concrete types over type variables when possible.
  */
 function extractConcreteType(bound: PolarType, varId: number): PolarType | null {
@@ -399,6 +399,103 @@ function extractConcreteType(bound: PolarType, varId: number): PolarType | null 
 
   // Otherwise, the bound is concrete
   return bound;
+}
+
+/**
+ * Simplify a type by removing type variables from unions/intersections
+ * where we have concrete types available, and converting unresolved
+ * type variables to 'unknown' for clean output.
+ *
+ * This is used for final output to produce clean, readable types.
+ */
+export function simplifyTypeForOutput(type: PolarType): PolarType {
+  switch (type.kind) {
+    case 'var':
+      // Type variables that reach output are unresolved
+      // Convert them to 'unknown' for cleaner output
+      return { kind: 'unknown' };
+
+    case 'union': {
+      // First simplify all members recursively
+      const simplified = type.members.map(m => simplifyTypeForOutput(m));
+
+      // Filter out unknown types if we have concrete types
+      const concrete = simplified.filter(m => m.kind !== 'unknown' && m.kind !== 'var');
+      const unknowns = simplified.filter(m => m.kind === 'unknown' || m.kind === 'var');
+
+      // If we have concrete types, prefer them over unknowns
+      if (concrete.length > 0) {
+        if (concrete.length === 1) return concrete[0]!;
+        return union(concrete);
+      }
+
+      // If only unknowns, return a single unknown
+      if (unknowns.length > 0) {
+        return { kind: 'unknown' };
+      }
+
+      return type;
+    }
+
+    case 'intersection': {
+      // First simplify all members recursively
+      const simplified = type.members.map(m => simplifyTypeForOutput(m));
+
+      // Filter out unknown types if we have concrete types
+      const concrete = simplified.filter(m => m.kind !== 'unknown' && m.kind !== 'var');
+      const unknowns = simplified.filter(m => m.kind === 'unknown' || m.kind === 'var');
+
+      // If we have concrete types, prefer them
+      if (concrete.length > 0) {
+        if (concrete.length === 1) return concrete[0]!;
+        return intersection(concrete);
+      }
+
+      // If only unknowns, return a single unknown
+      if (unknowns.length > 0) {
+        return { kind: 'unknown' };
+      }
+
+      return type;
+    }
+
+    case 'function':
+      return {
+        ...type,
+        params: type.params.map(p => ({
+          ...p,
+          type: simplifyTypeForOutput(p.type),
+        })),
+        returnType: simplifyTypeForOutput(type.returnType),
+      } as FunctionType;
+
+    case 'record': {
+      const newFields = new Map<string, FieldType>();
+      for (const [name, field] of type.fields) {
+        newFields.set(name, {
+          ...field,
+          type: simplifyTypeForOutput(field.type),
+        });
+      }
+      return { ...type, fields: newFields } as RecordType;
+    }
+
+    case 'array':
+      return {
+        ...type,
+        elementType: simplifyTypeForOutput(type.elementType),
+        tuple: type.tuple?.map(t => simplifyTypeForOutput(t)),
+      } as ArrayType;
+
+    case 'promise':
+      return {
+        ...type,
+        resolvedType: simplifyTypeForOutput(type.resolvedType),
+      };
+
+    default:
+      return type;
+  }
 }
 
 // ============================================================================

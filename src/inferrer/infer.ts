@@ -20,7 +20,7 @@ import {
   failure,
 } from '../solver/index.js';
 import { BiunificationContext, biunify } from '../solver/biunify.js';
-import { applyPositive } from '../solver/bisubstitution.js';
+import { applyPositive, simplifyTypeForOutput } from '../solver/bisubstitution.js';
 import { simplify } from '../automata/index.js';
 import { typeToAutomaton, automatonToType } from '../automata/convert.js';
 import type { InferResult, StatementResult } from './context.js';
@@ -189,21 +189,44 @@ export function checkSubtype(sub: PolarType, sup: PolarType): boolean {
 // ============================================================================
 
 /**
- * Simplify a type using automata minimization
+ * Simplify a type using automata minimization and output cleanup
  */
 export function simplifyType(type: PolarType): PolarType {
   try {
+    // First apply output simplification to clean up type variables
+    const cleaned = simplifyTypeForOutput(type);
+
+    // If the cleaned type is already a simple type (unknown, primitive, etc.),
+    // skip automaton processing
+    if (cleaned.kind === 'unknown' || cleaned.kind === 'never' ||
+        cleaned.kind === 'any' || cleaned.kind === 'primitive') {
+      return cleaned;
+    }
+
+    // For function types with only unknown parameters and return, keep it simple
+    if (cleaned.kind === 'function') {
+      const allParamsUnknown = cleaned.params.every(p => p.type.kind === 'unknown');
+      const returnUnknown = cleaned.returnType.kind === 'unknown';
+      if (allParamsUnknown || returnUnknown) {
+        // Return the simplified function without automaton processing
+        return cleaned;
+      }
+    }
+
     // Convert to automaton
-    const automaton = typeToAutomaton(type, '+');
+    const automaton = typeToAutomaton(cleaned, '+');
 
     // Simplify
     const simplified = simplify(automaton);
 
     // Convert back
-    return automatonToType(simplified);
+    const result = automatonToType(simplified);
+
+    // Apply output simplification again after automaton conversion
+    return simplifyTypeForOutput(result);
   } catch {
-    // If simplification fails, return original
-    return type;
+    // If simplification fails, at least clean up the type
+    return simplifyTypeForOutput(type);
   }
 }
 

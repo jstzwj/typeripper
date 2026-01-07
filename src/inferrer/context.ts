@@ -442,14 +442,19 @@ export function emptyStatementResult(): StatementResult {
 // Type Environment
 // ============================================================================
 
+import { createBuiltinEnvironment } from '../js/builtins.js';
+
 /**
  * Initial type environment with built-in types
  */
 export function createInitialContext(): InferenceContext {
   const ctx = new InferenceContext();
 
-  // Built-in global values will be added by the builtins module
-  // This just creates an empty initial context
+  // Load built-in global values (Math, Array, Object, etc.)
+  const builtins = createBuiltinEnvironment();
+  for (const [name, scheme] of builtins) {
+    ctx.bindScheme(name, scheme);
+  }
 
   return ctx;
 }

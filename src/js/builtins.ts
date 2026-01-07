@@ -22,6 +22,7 @@ import {
   never,
   param,
   union,
+  intersection,
 } from '../types/factory.js';
 import { typingScheme, polyScheme } from '../types/scheme.js';
 import {
@@ -73,11 +74,21 @@ export function objectConstructorType(): PolarType {
 
 /**
  * Create the Array constructor type
+ *
+ * Array is both callable (Array(...)) and has static methods (Array.isArray).
+ * We model this as an intersection of function type and record type.
  */
 export function arrayConstructorType(): PolarType {
   const elemVar = freshTypeVar('T');
 
-  return record({
+  // Array can be called as a function: Array(item1, item2, ...) => T[]
+  const callableType = func(
+    [param('items', elemVar, { rest: true })],
+    array(elemVar)
+  );
+
+  // Array also has static properties
+  const staticType = record({
     prototype: arrayPrototype(),
     isArray: func([param('value', any)], boolean),
     from: func([
@@ -86,6 +97,9 @@ export function arrayConstructorType(): PolarType {
     ], array(elemVar)),
     of: func([param('items', elemVar, { rest: true })], array(elemVar)),
   });
+
+  // Use intersection to combine callable and static properties
+  return intersection([callableType, staticType]);
 }
 
 /**

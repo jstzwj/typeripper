@@ -13,7 +13,7 @@
  * 3. Track visited constraint pairs to handle recursive types
  */
 
-import type { PolarType, TypeVar } from '../types/index.js';
+import type { PolarType, TypeVar, RecordType, FieldType } from '../types/index.js';
 import { isTypeVar, occursIn, freeVars, substitute } from '../types/index.js';
 import { union, intersection, freshTypeVar } from '../types/index.js';
 import type { FlowConstraint, SourceLocation, SolveResult, SolveError } from './constraint.js';
@@ -170,6 +170,62 @@ export class BiunificationContext {
           kind: 'flow' as const,
           positive: pos,
           negative: m,
+          source,
+        }))
+      );
+    }
+
+    // Rule: (τ₁⁺ ⊓ τ₂⁺) ≤ τ⁻ → find a matching member
+    // For intersection in positive position, we try each member until one succeeds.
+    // This is needed for callable objects (like Array which is Function & {isArray: ...}).
+    if (pos.kind === 'intersection') {
+      // For function types: find a function member in the intersection
+      if (neg.kind === 'function') {
+        const funcMember = pos.members.find(m => m.kind === 'function');
+        if (funcMember) {
+          return success([{
+            kind: 'flow' as const,
+            positive: funcMember,
+            negative: neg,
+            source,
+          }]);
+        }
+      }
+
+      // For record types: merge all record members and check against neg
+      if (neg.kind === 'record') {
+        const recordMembers = pos.members.filter(m => m.kind === 'record');
+        if (recordMembers.length > 0) {
+          // Merge all record fields
+          const mergedFields = new Map<string, FieldType>();
+          for (const rec of recordMembers) {
+            if (rec.kind === 'record') {
+              for (const [name, field] of rec.fields) {
+                mergedFields.set(name, field);
+              }
+            }
+          }
+          const mergedRecord: RecordType = {
+            kind: 'record',
+            fields: mergedFields,
+            rest: null,
+          };
+          return success([{
+            kind: 'flow' as const,
+            positive: mergedRecord,
+            negative: neg,
+            source,
+          }]);
+        }
+      }
+
+      // Fallback: each member of the intersection must satisfy the negative type
+      // This is sound but may be overly strict
+      return success(
+        pos.members.map(m => ({
+          kind: 'flow' as const,
+          positive: m,
+          negative: neg,
           source,
         }))
       );
