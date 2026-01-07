@@ -275,6 +275,45 @@ export const Types = {
       return Types.any();
     }
 
+    // Simplify unions where all members are the same primitive kind
+    // e.g., 1 | 2 | number -> number, "a" | "b" | string -> string
+    const kinds = new Set(withoutNever.map(t => t.kind));
+    if (kinds.size === 1) {
+      const kind = withoutNever[0]!.kind;
+      // If all are numbers (including literals), check if any is base number
+      if (kind === 'number') {
+        const hasBaseNumber = withoutNever.some(t => (t as NumberType).value === undefined);
+        if (hasBaseNumber) {
+          return numberSingleton;
+        }
+        // If we have multiple number literals, they form a union - but let's check if
+        // there's a base type among them. If not, keep the union.
+      }
+      if (kind === 'string') {
+        const hasBaseString = withoutNever.some(t => (t as StringType).value === undefined);
+        if (hasBaseString) {
+          return stringSingleton;
+        }
+      }
+      if (kind === 'boolean') {
+        const hasBaseBoolean = withoutNever.some(t => (t as BooleanType).value === undefined);
+        if (hasBaseBoolean) {
+          return booleanSingleton;
+        }
+        // If we have both true and false literals, simplify to boolean
+        const values = withoutNever.map(t => (t as BooleanType).value);
+        if (values.includes(true) && values.includes(false)) {
+          return booleanSingleton;
+        }
+      }
+      if (kind === 'bigint') {
+        const hasBaseBigint = withoutNever.some(t => (t as BigIntType).value === undefined);
+        if (hasBaseBigint) {
+          return bigintSingleton;
+        }
+      }
+    }
+
     return {
       kind: 'union',
       id: generateTypeId('union'),

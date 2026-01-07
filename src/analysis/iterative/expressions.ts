@@ -273,15 +273,16 @@ export function analyzeFunction(
   }
 
   // Create function state for simple traversal
-  const funcState: TypeState = {
+  let funcState: TypeState = {
     env: funcEnv,
     expressionTypes: new Map(),
     reachable: true,
   };
 
   // Simple traversal to collect annotations (with loop-awareness)
+  // State is updated as we process declarations to allow forward references
   for (const stmt of statements) {
-    collectAnnotationsFromStatementWithLoop(stmt, funcState, ctx, false, modifiedInLoop);
+    funcState = collectAnnotationsFromStatementWithLoop(stmt, funcState, ctx, false, modifiedInLoop);
   }
 }
 
@@ -424,11 +425,12 @@ function collectModifiedInLoops(
 
 /**
  * Collect declarations and widen types for variables that are modified in loops
+ * Now uses full expression inference for better type accuracy
  */
 function collectDeclarationsInBlockWithModified(
   block: t.BlockStatement,
   env: TypeEnvironment,
-  ctx: IterativeContext | undefined,
+  ctx: IterativeContext,
   modifiedInLoop: Set<string>
 ): TypeEnvironment {
   let result = env;
@@ -442,11 +444,12 @@ function collectDeclarationsInBlockWithModified(
 
 /**
  * Collect declarations with awareness of loop-modified variables
+ * Uses full expression inference for accurate types
  */
 function collectDeclarationsInStatementWithModified(
   stmt: t.Statement,
   env: TypeEnvironment,
-  ctx: IterativeContext | undefined,
+  ctx: IterativeContext,
   insideLoop: boolean,
   modifiedInLoop: Set<string>
 ): TypeEnvironment {
@@ -459,37 +462,42 @@ function collectDeclarationsInStatementWithModified(
         // Check if this variable is modified in a loop
         const shouldWiden = insideLoop || modifiedInLoop.has(decl.id.name);
 
-        let initType: Type = Types.any();
+        let initType: Type = Types.undefined;
         if (decl.init) {
-          if (t.isNumericLiteral(decl.init)) {
-            initType = shouldWiden ? Types.number : Types.numberLiteral(decl.init.value);
-          } else if (t.isStringLiteral(decl.init)) {
-            initType = shouldWiden ? Types.string : Types.stringLiteral(decl.init.value);
-          } else if (t.isBooleanLiteral(decl.init)) {
-            initType = shouldWiden ? Types.boolean : Types.booleanLiteral(decl.init.value);
-          } else if (t.isNullLiteral(decl.init)) {
-            initType = Types.null;
-          } else if (t.isArrayExpression(decl.init)) {
-            initType = Types.array(Types.any());
-          } else if (t.isObjectExpression(decl.init)) {
-            initType = Types.object({});
+          // Create a temporary state for expression inference
+          const tempState: TypeState = {
+            env: result,
+            expressionTypes: new Map(),
+            reachable: true,
+          };
+          // Use full expression inference for accurate types
+          initType = inferExpression(decl.init, tempState, ctx);
+
+          // Widen if needed
+          if (shouldWiden) {
+            initType = Types.widen(initType);
           }
         }
         result = updateBinding(result, decl.id.name, initType, kind, decl);
 
-        if (ctx) {
-          addAnnotation(ctx, {
-            node: decl.id,
-            name: decl.id.name,
-            type: initType,
-            kind: kind === 'const' ? 'const' : 'variable',
-            skipIfExists: true,
-          });
-        }
+        addAnnotation(ctx, {
+          node: decl.id,
+          name: decl.id.name,
+          type: initType,
+          kind: kind === 'const' ? 'const' : 'variable',
+          skipIfExists: true,
+        });
       }
     }
   } else if (t.isFunctionDeclaration(stmt) && stmt.id) {
-    result = updateBinding(result, stmt.id.name, Types.function({ params: [], returnType: Types.any() }), 'function', stmt);
+    // Create a temporary state for function type inference
+    const tempState: TypeState = {
+      env: result,
+      expressionTypes: new Map(),
+      reachable: true,
+    };
+    const funcType = inferFunctionType(stmt, tempState, ctx);
+    result = updateBinding(result, stmt.id.name, funcType, 'function', stmt);
   } else if (t.isForStatement(stmt)) {
     if (t.isVariableDeclaration(stmt.init)) {
       result = collectDeclarationsInStatementWithModified(stmt.init, result, ctx, true, modifiedInLoop);
@@ -751,22 +759,69 @@ export function inferClassType(
   const instanceProps = new Map<string, ReturnType<typeof Types.property>>();
   const staticProps = new Map<string, ReturnType<typeof Types.property>>();
   let ctorType = Types.function({ params: [], returnType: Types.undefined });
+  let ctorParams: Array<ReturnType<typeof Types.param>> = [];
 
+  // First pass: find constructor and extract parameter types
+  // Also collect this.xxx = yyy assignments to infer instance properties
+  for (const member of node.body.body) {
+    if (t.isClassMethod(member) && member.kind === 'constructor') {
+      // Extract constructor parameters
+      for (const param of member.params) {
+        if (t.isIdentifier(param)) {
+          ctorParams.push(Types.param(param.name, Types.any()));
+        } else if (t.isRestElement(param) && t.isIdentifier(param.argument)) {
+          ctorParams.push(Types.param(param.argument.name, Types.array(Types.any()), { rest: true }));
+        } else if (t.isAssignmentPattern(param) && t.isIdentifier(param.left)) {
+          const defaultType = inferExpression(param.right, state, ctx);
+          ctorParams.push(Types.param(param.left.name, defaultType, { optional: true }));
+        }
+      }
+
+      // Analyze constructor body for this.xxx = yyy assignments
+      if (t.isBlockStatement(member.body)) {
+        // Create a temporary environment with constructor parameters
+        let ctorEnv = createEnv(state.env, 'function');
+        for (const param of member.params) {
+          if (t.isIdentifier(param)) {
+            ctorEnv = updateBinding(ctorEnv, param.name, Types.any(), 'param', param);
+          }
+        }
+        const ctorState: TypeState = { ...state, env: ctorEnv };
+
+        collectThisAssignmentsForClass(member.body, instanceProps, ctorState, ctx);
+      }
+
+      ctorType = Types.function({ params: ctorParams, returnType: Types.undefined });
+    }
+  }
+
+  // Create a preliminary instance type for recursive references
+  const prelimInstanceType = Types.object({ properties: new Map(instanceProps) });
+
+  // Create the class type early so methods can reference it
+  const selfClassType = Types.class({
+    name: className,
+    constructor: ctorType,
+    instanceType: prelimInstanceType,
+    staticProperties: new Map(),
+  });
+
+  // Second pass: infer method types with proper 'this' type
   for (const member of node.body.body) {
     if (t.isClassMethod(member)) {
-      const methodType = inferClassMethodType(member, state, ctx);
-
       if (member.kind === 'constructor') {
-        if (methodType.kind === 'function') {
-          ctorType = methodType;
-        }
+        // Already handled above
+        continue;
+      }
+
+      // Infer method type with 'this' bound to instance type
+      const methodType = inferClassMethodTypeWithThis(member, state, ctx, prelimInstanceType, className);
+
+      const name = t.isIdentifier(member.key) ? member.key.name : 'unknown';
+      if (member.static) {
+        staticProps.set(name, Types.property(methodType));
       } else {
-        const name = t.isIdentifier(member.key) ? member.key.name : 'unknown';
-        if (member.static) {
-          staticProps.set(name, Types.property(methodType));
-        } else {
-          instanceProps.set(name, Types.property(methodType));
-        }
+        instanceProps.set(name, Types.property(methodType));
       }
     } else if (t.isClassProperty(member)) {
       const name = t.isIdentifier(member.key) ? member.key.name : 'unknown';
@@ -775,7 +830,10 @@ export function inferClassType(
       if (member.static) {
         staticProps.set(name, Types.property(propType));
       } else {
-        instanceProps.set(name, Types.property(propType));
+        // Don't overwrite properties from constructor
+        if (!instanceProps.has(name)) {
+          instanceProps.set(name, Types.property(propType));
+        }
       }
     }
   }
@@ -785,6 +843,99 @@ export function inferClassType(
     constructor: ctorType,
     instanceType: Types.object({ properties: instanceProps }),
     staticProperties: staticProps,
+  });
+}
+
+/**
+ * Collect this.xxx = yyy assignments from constructor body for class instance properties
+ */
+function collectThisAssignmentsForClass(
+  node: t.Node,
+  properties: Map<string, ReturnType<typeof Types.property>>,
+  state: TypeState,
+  ctx: IterativeContext
+): void {
+  if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) {
+    const assignment = node.expression;
+    // Check for this.xxx = ...
+    if (
+      t.isMemberExpression(assignment.left) &&
+      t.isThisExpression(assignment.left.object) &&
+      t.isIdentifier(assignment.left.property) &&
+      !assignment.left.computed
+    ) {
+      const propName = assignment.left.property.name;
+      const valueType = inferExpression(assignment.right, state, ctx);
+      properties.set(propName, Types.property(valueType));
+    }
+  } else if (t.isBlockStatement(node)) {
+    for (const stmt of node.body) {
+      collectThisAssignmentsForClass(stmt, properties, state, ctx);
+    }
+  } else if (t.isIfStatement(node)) {
+    collectThisAssignmentsForClass(node.consequent, properties, state, ctx);
+    if (node.alternate) {
+      collectThisAssignmentsForClass(node.alternate, properties, state, ctx);
+    }
+  } else if (t.isForStatement(node) || t.isWhileStatement(node) || t.isDoWhileStatement(node)) {
+    collectThisAssignmentsForClass(node.body, properties, state, ctx);
+  }
+}
+
+/**
+ * Infer class method type with proper 'this' binding
+ */
+function inferClassMethodTypeWithThis(
+  node: t.ClassMethod,
+  state: TypeState,
+  ctx: IterativeContext,
+  thisType: Type,
+  className: string
+): Type {
+  const params: Array<ReturnType<typeof Types.param>> = [];
+
+  // Create environment with 'this' bound to the instance type
+  let methodEnv = createEnv(state.env, 'function');
+  methodEnv = updateBinding(methodEnv, 'this', thisType, 'const', node);
+
+  for (const param of node.params) {
+    if (t.isIdentifier(param)) {
+      params.push(Types.param(param.name, Types.any()));
+      methodEnv = updateBinding(methodEnv, param.name, Types.any(), 'param', param);
+    } else if (t.isRestElement(param) && t.isIdentifier(param.argument)) {
+      params.push(Types.param(param.argument.name, Types.array(Types.any()), { rest: true }));
+      methodEnv = updateBinding(methodEnv, param.argument.name, Types.array(Types.any()), 'param', param);
+    } else if (t.isAssignmentPattern(param) && t.isIdentifier(param.left)) {
+      const defaultType = inferExpression(param.right, state, ctx);
+      params.push(Types.param(param.left.name, defaultType, { optional: true }));
+      methodEnv = updateBinding(methodEnv, param.left.name, defaultType, 'param', param);
+    }
+  }
+
+  const methodState: TypeState = {
+    env: methodEnv,
+    expressionTypes: new Map(),
+    reachable: true,
+  };
+
+  let returnType: Type = Types.undefined;
+
+  if (t.isBlockStatement(node.body)) {
+    returnType = inferBlockReturnType(node.body, methodState, ctx);
+  }
+
+  const isAsync = node.async;
+  const isGenerator = node.generator;
+
+  if (isAsync && returnType.kind !== 'promise') {
+    returnType = Types.promise(returnType);
+  }
+
+  return Types.function({
+    params,
+    returnType,
+    isAsync,
+    isGenerator,
   });
 }
 
@@ -831,6 +982,32 @@ function inferClassMethodType(
 }
 
 /**
+ * Check if a type is definitely numeric (number or bigint, not any/unknown)
+ */
+function isDefinitelyNumeric(type: Type): boolean {
+  if (type.kind === 'number' || type.kind === 'bigint') {
+    return true;
+  }
+  if (type.kind === 'union') {
+    // Union is numeric if all non-never members are numeric
+    return type.members.every(m => m.kind === 'never' || m.kind === 'number' || m.kind === 'bigint');
+  }
+  return false;
+}
+
+/**
+ * Check if a type could be a string (for + operator disambiguation)
+ */
+function couldBeString(type: Type): boolean {
+  if (type.kind === 'string') return true;
+  if (type.kind === 'any' || type.kind === 'unknown') return true;
+  if (type.kind === 'union') {
+    return type.members.some(m => couldBeString(m));
+  }
+  return false;
+}
+
+/**
  * Infer binary expression type
  */
 export function inferBinaryExpression(
@@ -843,15 +1020,33 @@ export function inferBinaryExpression(
 
   switch (expr.operator) {
     case '+':
+      // If either side is definitely a string, result is string
       if (left.kind === 'string' || right.kind === 'string') {
         return Types.string;
       }
+      // If both sides are definitely numbers, result is number
       if (left.kind === 'number' && right.kind === 'number') {
         if (left.value !== undefined && right.value !== undefined) {
           return Types.numberLiteral(left.value + right.value);
         }
         return Types.number;
       }
+      // If one side is number and other is any/unknown, check context
+      // In numeric context (e.g., result of another + with number), prefer number
+      if (isDefinitelyNumeric(left) && (right.kind === 'any' || right.kind === 'unknown')) {
+        // If we're adding number + any, and this is part of a larger numeric expression,
+        // it's likely numeric. Be optimistic and return number.
+        return Types.number;
+      }
+      if (isDefinitelyNumeric(right) && (left.kind === 'any' || left.kind === 'unknown')) {
+        return Types.number;
+      }
+      // If both are any/unknown, could be either
+      if ((left.kind === 'any' || left.kind === 'unknown') &&
+          (right.kind === 'any' || right.kind === 'unknown')) {
+        return Types.union([Types.string, Types.number]);
+      }
+      // Default: could be string or number
       return Types.union([Types.string, Types.number]);
 
     case '-':
@@ -1414,6 +1609,7 @@ function collectAnnotationsFromStatement(
 /**
  * Loop-aware statement traversal to collect annotations (for nested functions)
  * This version tracks whether we're inside a loop and widens types accordingly.
+ * Returns updated state with any new bindings.
  */
 function collectAnnotationsFromStatementWithLoop(
   stmt: t.Statement,
@@ -1421,9 +1617,10 @@ function collectAnnotationsFromStatementWithLoop(
   ctx: IterativeContext,
   insideLoop: boolean,
   modifiedInLoop: Set<string>
-): void {
+): TypeState {
   if (t.isVariableDeclaration(stmt)) {
     const kind = stmt.kind === 'const' ? 'const' : stmt.kind === 'let' ? 'let' : 'var';
+    let currentState = state;
     for (const decl of stmt.declarations) {
       if (t.isIdentifier(decl.id)) {
         // Check if this variable is modified in a loop
@@ -1431,12 +1628,17 @@ function collectAnnotationsFromStatementWithLoop(
 
         let initType: Type = Types.any();
         if (decl.init) {
-          initType = inferExpression(decl.init, state, ctx);
+          initType = inferExpression(decl.init, currentState, ctx);
           // Widen if needed
           if (shouldWiden) {
             initType = Types.widen(initType);
           }
         }
+
+        currentState = {
+          ...currentState,
+          env: updateBinding(currentState.env, decl.id.name, initType, kind, decl),
+        };
 
         addAnnotation(ctx, {
           node: decl.id,
@@ -1446,46 +1648,62 @@ function collectAnnotationsFromStatementWithLoop(
         });
       }
     }
+    return currentState;
   } else if (t.isFunctionDeclaration(stmt) && stmt.id) {
     const funcType = inferFunctionType(stmt, state, ctx);
+    // Update environment with the inferred function type
+    const newState = {
+      ...state,
+      env: updateBinding(state.env, stmt.id.name, funcType, 'function', stmt),
+    };
     addAnnotation(ctx, {
       node: stmt.id,
       name: stmt.id.name,
       type: funcType,
       kind: 'function',
     });
+    return newState;
   } else if (t.isBlockStatement(stmt)) {
+    let currentState = state;
     for (const s of stmt.body) {
-      collectAnnotationsFromStatementWithLoop(s, state, ctx, insideLoop, modifiedInLoop);
+      currentState = collectAnnotationsFromStatementWithLoop(s, currentState, ctx, insideLoop, modifiedInLoop);
     }
+    return currentState;
   } else if (t.isIfStatement(stmt)) {
-    collectAnnotationsFromStatementWithLoop(stmt.consequent, state, ctx, insideLoop, modifiedInLoop);
+    let currentState = collectAnnotationsFromStatementWithLoop(stmt.consequent, state, ctx, insideLoop, modifiedInLoop);
     if (stmt.alternate) {
-      collectAnnotationsFromStatementWithLoop(stmt.alternate, state, ctx, insideLoop, modifiedInLoop);
+      currentState = collectAnnotationsFromStatementWithLoop(stmt.alternate, currentState, ctx, insideLoop, modifiedInLoop);
     }
+    return currentState;
   } else if (t.isForStatement(stmt)) {
+    let currentState = state;
     // For loop init declares loop variables - these should be widened
     if (stmt.init && t.isVariableDeclaration(stmt.init)) {
-      collectAnnotationsFromStatementWithLoop(stmt.init, state, ctx, true, modifiedInLoop);
+      currentState = collectAnnotationsFromStatementWithLoop(stmt.init, currentState, ctx, true, modifiedInLoop);
     }
     // Body is inside the loop
-    collectAnnotationsFromStatementWithLoop(stmt.body, state, ctx, true, modifiedInLoop);
+    currentState = collectAnnotationsFromStatementWithLoop(stmt.body, currentState, ctx, true, modifiedInLoop);
+    return currentState;
   } else if (t.isWhileStatement(stmt) || t.isDoWhileStatement(stmt)) {
     // Body is inside the loop
-    collectAnnotationsFromStatementWithLoop(stmt.body, state, ctx, true, modifiedInLoop);
+    return collectAnnotationsFromStatementWithLoop(stmt.body, state, ctx, true, modifiedInLoop);
   } else if (t.isTryStatement(stmt)) {
-    collectAnnotationsFromStatementWithLoop(stmt.block, state, ctx, insideLoop, modifiedInLoop);
+    let currentState = collectAnnotationsFromStatementWithLoop(stmt.block, state, ctx, insideLoop, modifiedInLoop);
     if (stmt.handler) {
-      collectAnnotationsFromStatementWithLoop(stmt.handler.body, state, ctx, insideLoop, modifiedInLoop);
+      currentState = collectAnnotationsFromStatementWithLoop(stmt.handler.body, currentState, ctx, insideLoop, modifiedInLoop);
     }
     if (stmt.finalizer) {
-      collectAnnotationsFromStatementWithLoop(stmt.finalizer, state, ctx, insideLoop, modifiedInLoop);
+      currentState = collectAnnotationsFromStatementWithLoop(stmt.finalizer, currentState, ctx, insideLoop, modifiedInLoop);
     }
+    return currentState;
   } else if (t.isSwitchStatement(stmt)) {
+    let currentState = state;
     for (const c of stmt.cases) {
       for (const s of c.consequent) {
-        collectAnnotationsFromStatementWithLoop(s, state, ctx, insideLoop, modifiedInLoop);
+        currentState = collectAnnotationsFromStatementWithLoop(s, currentState, ctx, insideLoop, modifiedInLoop);
       }
     }
+    return currentState;
   }
+  return state;
 }
