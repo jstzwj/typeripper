@@ -2,7 +2,7 @@
  * Type exports
  */
 
-// Core types
+// Core types (legacy - kept for compatibility)
 export type {
   Type,
   TypeKind,
@@ -31,47 +31,6 @@ export type {
   PromiseType,
   IteratorType,
 } from './types.js';
-
-// CFG types
-export type {
-  NodeId,
-  EdgeId,
-  BasicBlock,
-  Terminator,
-  FallthroughTerminator,
-  BranchTerminator,
-  SwitchTerminator,
-  ReturnTerminator,
-  ThrowTerminator,
-  BreakTerminator,
-  ContinueTerminator,
-  TryTerminator,
-  CFGEdge,
-  EdgeKind,
-  EdgeCondition,
-  CFG,
-  ProgramCFG,
-  SwitchCase,
-} from './cfg.js';
-
-// Analysis types
-export type {
-  Binding,
-  TypeEnvironment,
-  ScopeKind,
-  TypeState,
-  TypeConstraint,
-  EqualityConstraint,
-  SubtypeConstraint,
-  PropertyConstraint,
-  CallConstraint,
-  AssignmentConstraint,
-  AnalysisResult,
-  TypeError,
-  TypeErrorKind,
-  TypeWarning,
-  TypeWarningKind,
-} from './analysis.js';
 
 // Annotation types
 export type {
