@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from '../src/parser/index.js';
-import { inferProgram } from '../src/inference/inferrer/infer.js';
+import { inferProgram } from '../src/inferrer/infer.js';
 import {
   formatReport,
   formatJSON,

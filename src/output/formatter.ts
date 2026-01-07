@@ -9,15 +9,15 @@
  * 5. Report (human-readable analysis)
  */
 
-import type { PolarType, FunctionType, RecordType, ArrayType, FieldType } from '../inference/types/polar.js';
-import type { ProgramInferenceResult } from '../inference/inferrer/infer.js';
-import { typeToString } from '../inference/types/polar.js';
+import type { PolarType, FunctionType, RecordType, ArrayType, FieldType } from '../types/polar.js';
+import type { ProgramInferenceResult } from '../inferrer/infer.js';
+import { typeToString } from '../types/polar.js';
 
 // Re-export types from inference module for convenience
 export type {
   ProgramInferenceResult,
   InferenceError,
-} from '../inference/inferrer/infer.js';
+} from '../inferrer/infer.js';
 
 // ============================================================================
 // Format Options
