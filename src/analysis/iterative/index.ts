@@ -6,10 +6,11 @@
  */
 
 import * as t from '@babel/types';
-import type { NodeId } from '../../types/index.js';
+import type { NodeId, Type, TypeEnvironment, NumberType, StringType, BooleanType } from '../../types/index.js';
 import type { TypeAnnotationResult } from '../../types/annotation.js';
 import type { TypeState } from '../../types/analysis.js';
 import { buildCFG } from '../../cfg/builder.js';
+import { Types } from '../../utils/type-factory.js';
 import type { IterativeContext, HoistedDeclaration } from './context.js';
 import { MAX_ITERATIONS } from './context.js';
 import {
@@ -19,11 +20,13 @@ import {
   updateBinding,
   joinStates,
   statesEqual,
+  lookupBinding,
 } from './state.js';
 import { narrowTypeByCondition } from './narrowing.js';
 import { addBuiltins } from './builtins.js';
 import { transfer } from './transfer.js';
 import { collectHoistedDeclarations, computeReversePostOrder } from './expressions.js';
+import { formatType } from '../../output/formatter.js';
 
 // Re-export types for external use
 export type { IterativeContext, HoistedDeclaration } from './context.js';
@@ -158,6 +161,10 @@ export function inferTypesIterative(
     });
   }
 
+  // After convergence, update annotations with final types from exit states
+  // This ensures variables modified in loops have their widened types
+  updateAnnotationsWithFinalTypes(ctx);
+
   return {
     filename,
     source,
@@ -282,4 +289,91 @@ export function analyzeIterative(
     blockExitStates: ctx.blockExitStates,
     iterations,
   };
+}
+
+/**
+ * Update annotations with final types from converged states.
+ * This is crucial for soundness: variables that are modified in loops
+ * need their types updated to reflect the widened types after iteration.
+ */
+function updateAnnotationsWithFinalTypes(ctx: IterativeContext): void {
+  // Collect all exit states to build a complete picture of variable types
+  // For each variable, we join the types from all blocks where it's visible
+  const finalTypes = new Map<string, Type>();
+
+  for (const [, exitState] of ctx.blockExitStates) {
+    if (!exitState.reachable) continue;
+
+    // Collect types from this block's environment
+    collectTypesFromEnv(exitState.env, finalTypes);
+  }
+
+  // Update annotations for variables/constants with their final types
+  for (const annotation of ctx.annotations) {
+    if (
+      annotation.name &&
+      (annotation.kind === 'variable' || annotation.kind === 'const')
+    ) {
+      const finalType = finalTypes.get(annotation.name);
+      if (finalType && finalType.id !== annotation.type.id) {
+        annotation.type = finalType;
+        annotation.typeString = formatType(finalType);
+      }
+    }
+  }
+}
+
+/**
+ * Collect types from an environment into a map, joining with existing types
+ */
+function collectTypesFromEnv(
+  env: TypeEnvironment,
+  types: Map<string, Type>
+): void {
+  for (const [name, binding] of env.bindings) {
+    const existing = types.get(name);
+    if (existing) {
+      // Join with existing type
+      const joined = joinTypesForFinal(existing, binding.type);
+      types.set(name, joined);
+    } else {
+      types.set(name, binding.type);
+    }
+  }
+}
+
+/**
+ * Join types for final annotation update.
+ * Similar to joinTypes but preserves widened base types.
+ */
+function joinTypesForFinal(t1: Type, t2: Type): Type {
+  if (t1.id === t2.id) return t1;
+  if (t1.kind === 'never') return t2;
+  if (t2.kind === 'never') return t1;
+
+  // If one is a base type and other is literal of same kind, prefer base
+  if (t1.kind === t2.kind) {
+    if (t1.kind === 'number') {
+      // If either is base number (no value), return base number
+      if ((t1 as NumberType).value === undefined || (t2 as NumberType).value === undefined) {
+        return Types.number;
+      }
+      // Both are literals but different, widen to number
+      return Types.number;
+    }
+    if (t1.kind === 'string') {
+      if ((t1 as StringType).value === undefined || (t2 as StringType).value === undefined) {
+        return Types.string;
+      }
+      return Types.string;
+    }
+    if (t1.kind === 'boolean') {
+      if ((t1 as BooleanType).value === undefined || (t2 as BooleanType).value === undefined) {
+        return Types.boolean;
+      }
+      return Types.boolean;
+    }
+  }
+
+  return Types.union([t1, t2]);
 }

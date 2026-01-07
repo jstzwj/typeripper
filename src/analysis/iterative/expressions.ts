@@ -265,6 +265,13 @@ export function analyzeFunction(
     funcEnv = updateBinding(funcEnv, name, decl.initialType, decl.kind, decl.node);
   }
 
+  // First pass: collect variables that are modified in loops
+  // These need to be widened for soundness
+  const modifiedInLoop = new Set<string>();
+  for (const stmt of statements) {
+    collectModifiedInLoops(stmt, modifiedInLoop, false);
+  }
+
   // Create function state for simple traversal
   const funcState: TypeState = {
     env: funcEnv,
@@ -272,9 +279,9 @@ export function analyzeFunction(
     reachable: true,
   };
 
-  // Simple traversal to collect annotations (without full iterative analysis)
+  // Simple traversal to collect annotations (with loop-awareness)
   for (const stmt of statements) {
-    collectAnnotationsFromStatement(stmt, funcState, ctx);
+    collectAnnotationsFromStatementWithLoop(stmt, funcState, ctx, false, modifiedInLoop);
   }
 }
 
@@ -307,10 +314,17 @@ export function inferFunctionType(
     }
   }
 
+  // First pass: collect variables that are modified in loops
+  // These need to be widened for soundness
+  const modifiedInLoop = new Set<string>();
+  if (t.isBlockStatement(node.body)) {
+    collectModifiedInLoops(node.body, modifiedInLoop, false);
+  }
+
   // Collect all variable declarations in function body for return type inference
   // Also adds annotations for each local variable
   if (t.isBlockStatement(node.body)) {
-    funcEnv = collectDeclarationsInBlock(node.body, funcEnv, ctx);
+    funcEnv = collectDeclarationsInBlockWithModified(node.body, funcEnv, ctx, modifiedInLoop);
   }
 
   // Create function-local state
@@ -344,18 +358,190 @@ export function inferFunctionType(
 }
 
 /**
- * Collect all variable declarations in a block (for return type inference)
- * Also adds annotations for each declaration
+ * Collect variables that are modified inside loops (compound assignment, ++, --)
+ * These need to be widened to their base types for soundness.
  */
-export function collectDeclarationsInBlock(
+function collectModifiedInLoops(
+  node: t.Node,
+  modified: Set<string>,
+  insideLoop: boolean
+): void {
+  if (t.isForStatement(node)) {
+    // The loop body is inside the loop
+    if (node.init) collectModifiedInLoops(node.init, modified, false);
+    if (node.test) collectModifiedInLoops(node.test, modified, true);
+    if (node.update) collectModifiedInLoops(node.update, modified, true);
+    if (node.body) collectModifiedInLoops(node.body, modified, true);
+  } else if (t.isWhileStatement(node) || t.isDoWhileStatement(node)) {
+    if (node.test) collectModifiedInLoops(node.test, modified, true);
+    collectModifiedInLoops(node.body, modified, true);
+  } else if (t.isBlockStatement(node)) {
+    for (const stmt of node.body) {
+      collectModifiedInLoops(stmt, modified, insideLoop);
+    }
+  } else if (t.isIfStatement(node)) {
+    collectModifiedInLoops(node.consequent, modified, insideLoop);
+    if (node.alternate) collectModifiedInLoops(node.alternate, modified, insideLoop);
+  } else if (t.isExpressionStatement(node)) {
+    collectModifiedInLoops(node.expression, modified, insideLoop);
+  } else if (t.isAssignmentExpression(node)) {
+    // Check for compound assignment (+=, -=, etc.) inside a loop
+    if (insideLoop && node.operator !== '=' && t.isIdentifier(node.left)) {
+      modified.add(node.left.name);
+    }
+    // Also check the right side for nested assignments
+    collectModifiedInLoops(node.right, modified, insideLoop);
+  } else if (t.isUpdateExpression(node)) {
+    // ++i or i++ inside a loop
+    if (insideLoop && t.isIdentifier(node.argument)) {
+      modified.add(node.argument.name);
+    }
+  } else if (t.isTryStatement(node)) {
+    collectModifiedInLoops(node.block, modified, insideLoop);
+    if (node.handler) collectModifiedInLoops(node.handler.body, modified, insideLoop);
+    if (node.finalizer) collectModifiedInLoops(node.finalizer, modified, insideLoop);
+  } else if (t.isSwitchStatement(node)) {
+    for (const c of node.cases) {
+      for (const stmt of c.consequent) {
+        collectModifiedInLoops(stmt, modified, insideLoop);
+      }
+    }
+  }
+}
+
+/**
+ * Collect declarations and widen types for variables that are modified in loops
+ */
+function collectDeclarationsInBlockWithModified(
   block: t.BlockStatement,
   env: TypeEnvironment,
-  ctx?: IterativeContext
+  ctx: IterativeContext | undefined,
+  modifiedInLoop: Set<string>
 ): TypeEnvironment {
   let result = env;
 
   for (const stmt of block.body) {
-    result = collectDeclarationsInStatement(stmt, result, ctx);
+    result = collectDeclarationsInStatementWithModified(stmt, result, ctx, false, modifiedInLoop);
+  }
+
+  return result;
+}
+
+/**
+ * Collect declarations with awareness of loop-modified variables
+ */
+function collectDeclarationsInStatementWithModified(
+  stmt: t.Statement,
+  env: TypeEnvironment,
+  ctx: IterativeContext | undefined,
+  insideLoop: boolean,
+  modifiedInLoop: Set<string>
+): TypeEnvironment {
+  let result = env;
+
+  if (t.isVariableDeclaration(stmt)) {
+    const kind = stmt.kind === 'const' ? 'const' : stmt.kind === 'let' ? 'let' : 'var';
+    for (const decl of stmt.declarations) {
+      if (t.isIdentifier(decl.id)) {
+        // Check if this variable is modified in a loop
+        const shouldWiden = insideLoop || modifiedInLoop.has(decl.id.name);
+
+        let initType: Type = Types.any();
+        if (decl.init) {
+          if (t.isNumericLiteral(decl.init)) {
+            initType = shouldWiden ? Types.number : Types.numberLiteral(decl.init.value);
+          } else if (t.isStringLiteral(decl.init)) {
+            initType = shouldWiden ? Types.string : Types.stringLiteral(decl.init.value);
+          } else if (t.isBooleanLiteral(decl.init)) {
+            initType = shouldWiden ? Types.boolean : Types.booleanLiteral(decl.init.value);
+          } else if (t.isNullLiteral(decl.init)) {
+            initType = Types.null;
+          } else if (t.isArrayExpression(decl.init)) {
+            initType = Types.array(Types.any());
+          } else if (t.isObjectExpression(decl.init)) {
+            initType = Types.object({});
+          }
+        }
+        result = updateBinding(result, decl.id.name, initType, kind, decl);
+
+        if (ctx) {
+          addAnnotation(ctx, {
+            node: decl.id,
+            name: decl.id.name,
+            type: initType,
+            kind: kind === 'const' ? 'const' : 'variable',
+            skipIfExists: true,
+          });
+        }
+      }
+    }
+  } else if (t.isFunctionDeclaration(stmt) && stmt.id) {
+    result = updateBinding(result, stmt.id.name, Types.function({ params: [], returnType: Types.any() }), 'function', stmt);
+  } else if (t.isForStatement(stmt)) {
+    if (t.isVariableDeclaration(stmt.init)) {
+      result = collectDeclarationsInStatementWithModified(stmt.init, result, ctx, true, modifiedInLoop);
+    }
+    if (t.isBlockStatement(stmt.body)) {
+      result = collectDeclarationsInBlockWithModified(stmt.body, result, ctx, modifiedInLoop);
+    } else {
+      result = collectDeclarationsInStatementWithModified(stmt.body, result, ctx, true, modifiedInLoop);
+    }
+  } else if (t.isWhileStatement(stmt) || t.isDoWhileStatement(stmt)) {
+    if (t.isBlockStatement(stmt.body)) {
+      result = collectDeclarationsInBlockWithModified(stmt.body, result, ctx, modifiedInLoop);
+    } else {
+      result = collectDeclarationsInStatementWithModified(stmt.body, result, ctx, true, modifiedInLoop);
+    }
+  } else if (t.isIfStatement(stmt)) {
+    if (t.isBlockStatement(stmt.consequent)) {
+      result = collectDeclarationsInBlockWithModified(stmt.consequent, result, ctx, modifiedInLoop);
+    } else {
+      result = collectDeclarationsInStatementWithModified(stmt.consequent, result, ctx, insideLoop, modifiedInLoop);
+    }
+    if (stmt.alternate) {
+      if (t.isBlockStatement(stmt.alternate)) {
+        result = collectDeclarationsInBlockWithModified(stmt.alternate, result, ctx, modifiedInLoop);
+      } else {
+        result = collectDeclarationsInStatementWithModified(stmt.alternate, result, ctx, insideLoop, modifiedInLoop);
+      }
+    }
+  } else if (t.isTryStatement(stmt)) {
+    result = collectDeclarationsInBlockWithModified(stmt.block, result, ctx, modifiedInLoop);
+    if (stmt.handler) {
+      result = collectDeclarationsInBlockWithModified(stmt.handler.body, result, ctx, modifiedInLoop);
+    }
+    if (stmt.finalizer) {
+      result = collectDeclarationsInBlockWithModified(stmt.finalizer, result, ctx, modifiedInLoop);
+    }
+  } else if (t.isSwitchStatement(stmt)) {
+    for (const c of stmt.cases) {
+      for (const s of c.consequent) {
+        result = collectDeclarationsInStatementWithModified(s, result, ctx, insideLoop, modifiedInLoop);
+      }
+    }
+  } else if (t.isBlockStatement(stmt)) {
+    result = collectDeclarationsInBlockWithModified(stmt, result, ctx, modifiedInLoop);
+  }
+
+  return result;
+}
+
+/**
+ * Collect all variable declarations in a block (for return type inference)
+ * Also adds annotations for each declaration
+ *
+ * @param insideLoop - Whether we're inside a loop body (for widening)
+ */
+export function collectDeclarationsInBlock(
+  block: t.BlockStatement,
+  env: TypeEnvironment,
+  ctx?: IterativeContext,
+  insideLoop: boolean = false
+): TypeEnvironment {
+  let result = env;
+
+  for (const stmt of block.body) {
+    result = collectDeclarationsInStatement(stmt, result, ctx, insideLoop);
   }
 
   return result;
@@ -364,11 +550,14 @@ export function collectDeclarationsInBlock(
 /**
  * Recursively collect declarations from a statement
  * Also adds annotations for each declaration
+ *
+ * @param insideLoop - Whether we're inside a loop body (for widening)
  */
 function collectDeclarationsInStatement(
   stmt: t.Statement,
   env: TypeEnvironment,
-  ctx?: IterativeContext
+  ctx?: IterativeContext,
+  insideLoop: boolean = false
 ): TypeEnvironment {
   let result = env;
 
@@ -380,11 +569,13 @@ function collectDeclarationsInStatement(
         let initType: Type = Types.any();
         if (decl.init) {
           if (t.isNumericLiteral(decl.init)) {
-            initType = Types.numberLiteral(decl.init.value);
+            // If we're inside a loop (e.g., for loop init), widen to number
+            // because the variable will be modified
+            initType = insideLoop ? Types.number : Types.numberLiteral(decl.init.value);
           } else if (t.isStringLiteral(decl.init)) {
-            initType = Types.stringLiteral(decl.init.value);
+            initType = insideLoop ? Types.string : Types.stringLiteral(decl.init.value);
           } else if (t.isBooleanLiteral(decl.init)) {
-            initType = Types.booleanLiteral(decl.init.value);
+            initType = insideLoop ? Types.boolean : Types.booleanLiteral(decl.init.value);
           } else if (t.isNullLiteral(decl.init)) {
             initType = Types.null;
           } else if (t.isArrayExpression(decl.init)) {
@@ -414,51 +605,51 @@ function collectDeclarationsInStatement(
   } else if (t.isFunctionDeclaration(stmt) && stmt.id) {
     result = updateBinding(result, stmt.id.name, Types.function({ params: [], returnType: Types.any() }), 'function', stmt);
   } else if (t.isForStatement(stmt)) {
-    // Collect declarations in for init
+    // Collect declarations in for init - these are loop variables, so widen
     if (t.isVariableDeclaration(stmt.init)) {
-      result = collectDeclarationsInStatement(stmt.init, result, ctx);
+      result = collectDeclarationsInStatement(stmt.init, result, ctx, true);
     }
-    // Collect declarations in for body
+    // Collect declarations in for body (still in loop context)
     if (t.isBlockStatement(stmt.body)) {
-      result = collectDeclarationsInBlock(stmt.body, result, ctx);
+      result = collectDeclarationsInBlock(stmt.body, result, ctx, true);
     } else {
-      result = collectDeclarationsInStatement(stmt.body, result, ctx);
+      result = collectDeclarationsInStatement(stmt.body, result, ctx, true);
     }
   } else if (t.isWhileStatement(stmt) || t.isDoWhileStatement(stmt)) {
     if (t.isBlockStatement(stmt.body)) {
-      result = collectDeclarationsInBlock(stmt.body, result, ctx);
+      result = collectDeclarationsInBlock(stmt.body, result, ctx, true);
     } else {
-      result = collectDeclarationsInStatement(stmt.body, result, ctx);
+      result = collectDeclarationsInStatement(stmt.body, result, ctx, true);
     }
   } else if (t.isIfStatement(stmt)) {
     if (t.isBlockStatement(stmt.consequent)) {
-      result = collectDeclarationsInBlock(stmt.consequent, result, ctx);
+      result = collectDeclarationsInBlock(stmt.consequent, result, ctx, insideLoop);
     } else {
-      result = collectDeclarationsInStatement(stmt.consequent, result, ctx);
+      result = collectDeclarationsInStatement(stmt.consequent, result, ctx, insideLoop);
     }
     if (stmt.alternate) {
       if (t.isBlockStatement(stmt.alternate)) {
-        result = collectDeclarationsInBlock(stmt.alternate, result, ctx);
+        result = collectDeclarationsInBlock(stmt.alternate, result, ctx, insideLoop);
       } else {
-        result = collectDeclarationsInStatement(stmt.alternate, result, ctx);
+        result = collectDeclarationsInStatement(stmt.alternate, result, ctx, insideLoop);
       }
     }
   } else if (t.isTryStatement(stmt)) {
-    result = collectDeclarationsInBlock(stmt.block, result, ctx);
+    result = collectDeclarationsInBlock(stmt.block, result, ctx, insideLoop);
     if (stmt.handler) {
-      result = collectDeclarationsInBlock(stmt.handler.body, result, ctx);
+      result = collectDeclarationsInBlock(stmt.handler.body, result, ctx, insideLoop);
     }
     if (stmt.finalizer) {
-      result = collectDeclarationsInBlock(stmt.finalizer, result, ctx);
+      result = collectDeclarationsInBlock(stmt.finalizer, result, ctx, insideLoop);
     }
   } else if (t.isSwitchStatement(stmt)) {
     for (const c of stmt.cases) {
       for (const s of c.consequent) {
-        result = collectDeclarationsInStatement(s, result, ctx);
+        result = collectDeclarationsInStatement(s, result, ctx, insideLoop);
       }
     }
   } else if (t.isBlockStatement(stmt)) {
-    result = collectDeclarationsInBlock(stmt, result, ctx);
+    result = collectDeclarationsInBlock(stmt, result, ctx, insideLoop);
   }
 
   return result;
@@ -773,11 +964,117 @@ export function inferNewExpression(
     return calleeType.instanceType;
   }
 
+  // For function constructors, analyze the function body for `this` assignments
   if (calleeType.kind === 'function') {
+    // Try to find the original function node to analyze this assignments
+    if (t.isIdentifier(expr.callee)) {
+      const binding = lookupBinding(state.env, expr.callee.name);
+      if (binding?.declarationNode) {
+        const funcNode = getFunctionFromBinding(binding.declarationNode);
+        if (funcNode) {
+          const instanceType = analyzeConstructorFunction(funcNode, state, ctx);
+          return instanceType;
+        }
+      }
+    }
     return Types.object({});
   }
 
   return Types.object({});
+}
+
+/**
+ * Get function node from a binding's declaration node
+ */
+function getFunctionFromBinding(node: t.Node): t.FunctionDeclaration | t.FunctionExpression | null {
+  if (t.isFunctionDeclaration(node)) {
+    return node;
+  }
+  if (t.isVariableDeclarator(node) && node.init) {
+    if (t.isFunctionExpression(node.init)) {
+      return node.init;
+    }
+  }
+  return null;
+}
+
+/**
+ * Analyze a constructor function to determine the instance type
+ * by looking at `this.xxx = ...` assignments in the function body.
+ */
+function analyzeConstructorFunction(
+  func: t.FunctionDeclaration | t.FunctionExpression,
+  state: TypeState,
+  ctx: IterativeContext
+): Type {
+  const properties = new Map<string, ReturnType<typeof Types.property>>();
+
+  if (!t.isBlockStatement(func.body)) {
+    return Types.object({ properties });
+  }
+
+  // Create a state with parameters bound
+  let funcEnv = createEnv(state.env, 'function');
+  for (const param of func.params) {
+    if (t.isIdentifier(param)) {
+      funcEnv = updateBinding(funcEnv, param.name, Types.any(), 'param', param);
+    }
+  }
+
+  const funcState: TypeState = {
+    env: funcEnv,
+    expressionTypes: new Map(),
+    reachable: true,
+  };
+
+  // Traverse function body to find this.xxx = ... assignments
+  collectThisAssignments(func.body, properties, funcState, ctx);
+
+  return Types.object({ properties });
+}
+
+/**
+ * Recursively collect this.xxx = ... assignments from statements
+ */
+function collectThisAssignments(
+  node: t.Node,
+  properties: Map<string, ReturnType<typeof Types.property>>,
+  state: TypeState,
+  ctx: IterativeContext
+): void {
+  if (t.isExpressionStatement(node) && t.isAssignmentExpression(node.expression)) {
+    const assignment = node.expression;
+    // Check for this.xxx = ...
+    if (
+      t.isMemberExpression(assignment.left) &&
+      t.isThisExpression(assignment.left.object) &&
+      t.isIdentifier(assignment.left.property) &&
+      !assignment.left.computed
+    ) {
+      const propName = assignment.left.property.name;
+      const valueType = inferExpression(assignment.right, state, ctx);
+      properties.set(propName, Types.property(valueType));
+    }
+  } else if (t.isBlockStatement(node)) {
+    for (const stmt of node.body) {
+      collectThisAssignments(stmt, properties, state, ctx);
+    }
+  } else if (t.isIfStatement(node)) {
+    collectThisAssignments(node.consequent, properties, state, ctx);
+    if (node.alternate) {
+      collectThisAssignments(node.alternate, properties, state, ctx);
+    }
+  } else if (t.isForStatement(node) || t.isWhileStatement(node) || t.isDoWhileStatement(node)) {
+    collectThisAssignments(node.body, properties, state, ctx);
+  } else if (t.isTryStatement(node)) {
+    collectThisAssignments(node.block, properties, state, ctx);
+    if (node.handler) {
+      collectThisAssignments(node.handler.body, properties, state, ctx);
+    }
+    if (node.finalizer) {
+      collectThisAssignments(node.finalizer, properties, state, ctx);
+    }
+  }
 }
 
 /**
@@ -1085,6 +1382,85 @@ function collectAnnotationsFromStatement(
     }
     if (stmt.finalizer) {
       collectAnnotationsFromStatement(stmt.finalizer, state, ctx);
+    }
+  }
+}
+
+/**
+ * Loop-aware statement traversal to collect annotations (for nested functions)
+ * This version tracks whether we're inside a loop and widens types accordingly.
+ */
+function collectAnnotationsFromStatementWithLoop(
+  stmt: t.Statement,
+  state: TypeState,
+  ctx: IterativeContext,
+  insideLoop: boolean,
+  modifiedInLoop: Set<string>
+): void {
+  if (t.isVariableDeclaration(stmt)) {
+    const kind = stmt.kind === 'const' ? 'const' : stmt.kind === 'let' ? 'let' : 'var';
+    for (const decl of stmt.declarations) {
+      if (t.isIdentifier(decl.id)) {
+        // Check if this variable is modified in a loop
+        const shouldWiden = insideLoop || modifiedInLoop.has(decl.id.name);
+
+        let initType: Type = Types.any();
+        if (decl.init) {
+          initType = inferExpression(decl.init, state, ctx);
+          // Widen if needed
+          if (shouldWiden) {
+            initType = Types.widen(initType);
+          }
+        }
+
+        addAnnotation(ctx, {
+          node: decl.id,
+          name: decl.id.name,
+          type: initType,
+          kind: kind === 'const' ? 'const' : 'variable',
+        });
+      }
+    }
+  } else if (t.isFunctionDeclaration(stmt) && stmt.id) {
+    const funcType = inferFunctionType(stmt, state, ctx);
+    addAnnotation(ctx, {
+      node: stmt.id,
+      name: stmt.id.name,
+      type: funcType,
+      kind: 'function',
+    });
+  } else if (t.isBlockStatement(stmt)) {
+    for (const s of stmt.body) {
+      collectAnnotationsFromStatementWithLoop(s, state, ctx, insideLoop, modifiedInLoop);
+    }
+  } else if (t.isIfStatement(stmt)) {
+    collectAnnotationsFromStatementWithLoop(stmt.consequent, state, ctx, insideLoop, modifiedInLoop);
+    if (stmt.alternate) {
+      collectAnnotationsFromStatementWithLoop(stmt.alternate, state, ctx, insideLoop, modifiedInLoop);
+    }
+  } else if (t.isForStatement(stmt)) {
+    // For loop init declares loop variables - these should be widened
+    if (stmt.init && t.isVariableDeclaration(stmt.init)) {
+      collectAnnotationsFromStatementWithLoop(stmt.init, state, ctx, true, modifiedInLoop);
+    }
+    // Body is inside the loop
+    collectAnnotationsFromStatementWithLoop(stmt.body, state, ctx, true, modifiedInLoop);
+  } else if (t.isWhileStatement(stmt) || t.isDoWhileStatement(stmt)) {
+    // Body is inside the loop
+    collectAnnotationsFromStatementWithLoop(stmt.body, state, ctx, true, modifiedInLoop);
+  } else if (t.isTryStatement(stmt)) {
+    collectAnnotationsFromStatementWithLoop(stmt.block, state, ctx, insideLoop, modifiedInLoop);
+    if (stmt.handler) {
+      collectAnnotationsFromStatementWithLoop(stmt.handler.body, state, ctx, insideLoop, modifiedInLoop);
+    }
+    if (stmt.finalizer) {
+      collectAnnotationsFromStatementWithLoop(stmt.finalizer, state, ctx, insideLoop, modifiedInLoop);
+    }
+  } else if (t.isSwitchStatement(stmt)) {
+    for (const c of stmt.cases) {
+      for (const s of c.consequent) {
+        collectAnnotationsFromStatementWithLoop(s, state, ctx, insideLoop, modifiedInLoop);
+      }
     }
   }
 }

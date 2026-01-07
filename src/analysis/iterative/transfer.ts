@@ -307,13 +307,40 @@ function transferAssignment(
         return state;
       }
 
-      // For iterative analysis, we might widen the type
+      // Determine the new type based on assignment operator
       let newType: Type;
       if (node.operator === '=') {
         newType = rightType;
       } else {
-        // Compound assignment - keep existing type structure but might widen
-        newType = joinTypes(binding.type, rightType);
+        // Compound assignment (+=, -=, *=, etc.)
+        // The result is always the widened type of the operation
+        switch (node.operator) {
+          case '+=':
+            // Could be string concatenation or numeric addition
+            if (binding.type.kind === 'string' || rightType.kind === 'string') {
+              newType = Types.string;
+            } else {
+              newType = Types.number;
+            }
+            break;
+          case '-=':
+          case '*=':
+          case '/=':
+          case '%=':
+          case '**=':
+          case '|=':
+          case '&=':
+          case '^=':
+          case '<<=':
+          case '>>=':
+          case '>>>=':
+            // These always produce numbers
+            newType = Types.number;
+            break;
+          default:
+            // For any other operator, join types
+            newType = joinTypes(binding.type, rightType);
+        }
       }
 
       return {

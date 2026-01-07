@@ -377,4 +377,77 @@ export const Types = {
       rest: options?.rest ?? false,
     };
   },
+
+  /**
+   * Widen a literal type to its base type.
+   * This is used to ensure soundness when a variable may hold multiple values.
+   * - number literal (e.g., 0) -> number
+   * - string literal (e.g., "hello") -> string
+   * - boolean literal (e.g., true) -> boolean
+   * - bigint literal -> bigint
+   * - union of literals -> base type if all same kind
+   */
+  widen(type: Type): Type {
+    switch (type.kind) {
+      case 'number':
+        // If it's a literal (has value), widen to base number
+        if ((type as NumberType).value !== undefined) {
+          return numberSingleton;
+        }
+        return type;
+      case 'string':
+        if ((type as StringType).value !== undefined) {
+          return stringSingleton;
+        }
+        return type;
+      case 'boolean':
+        if ((type as BooleanType).value !== undefined) {
+          return booleanSingleton;
+        }
+        return type;
+      case 'bigint':
+        if ((type as BigIntType).value !== undefined) {
+          return bigintSingleton;
+        }
+        return type;
+      case 'union':
+        // Widen all members and simplify
+        const widenedMembers = (type as UnionType).members.map(m => Types.widen(m));
+        // Check if all are same kind after widening
+        const kinds = new Set(widenedMembers.map(m => m.kind));
+        if (kinds.size === 1) {
+          // All same kind, return just that type
+          return widenedMembers[0]!;
+        }
+        return Types.union(widenedMembers);
+      case 'array':
+        // Widen element type
+        const arrType = type as ArrayType;
+        const widenedElement = Types.widen(arrType.elementType);
+        if (widenedElement.id !== arrType.elementType.id) {
+          return Types.array(widenedElement);
+        }
+        return type;
+      default:
+        return type;
+    }
+  },
+
+  /**
+   * Check if a type is a literal type (has a specific value)
+   */
+  isLiteral(type: Type): boolean {
+    switch (type.kind) {
+      case 'number':
+        return (type as NumberType).value !== undefined;
+      case 'string':
+        return (type as StringType).value !== undefined;
+      case 'boolean':
+        return (type as BooleanType).value !== undefined;
+      case 'bigint':
+        return (type as BigIntType).value !== undefined;
+      default:
+        return false;
+    }
+  },
 } as const;

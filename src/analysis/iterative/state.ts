@@ -146,7 +146,9 @@ function collectBindingNames(env: TypeEnvironment | null, names: Set<string>): v
 }
 
 /**
- * Join two types (create union)
+ * Join two types (create union or widen)
+ * When joining types at merge points (especially loop headers),
+ * we widen literal types to their base types for soundness.
  */
 export function joinTypes(t1: Type, t2: Type): Type {
   // Same type - no change
@@ -156,7 +158,27 @@ export function joinTypes(t1: Type, t2: Type): Type {
   if (t1.kind === 'never') return t2;
   if (t2.kind === 'never') return t1;
 
-  // Create union
+  // If types are the same kind, try to widen to base type
+  if (t1.kind === t2.kind) {
+    // Both are numbers (possibly literals) -> widen to number
+    if (t1.kind === 'number') {
+      return Types.number;
+    }
+    // Both are strings (possibly literals) -> widen to string
+    if (t1.kind === 'string') {
+      return Types.string;
+    }
+    // Both are booleans (possibly literals) -> widen to boolean
+    if (t1.kind === 'boolean') {
+      return Types.boolean;
+    }
+    // Both are bigints (possibly literals) -> widen to bigint
+    if (t1.kind === 'bigint') {
+      return Types.bigint;
+    }
+  }
+
+  // Create union (will be simplified by Types.union)
   return Types.union([t1, t2]);
 }
 
