@@ -20,6 +20,30 @@ import type { TypeState } from '../../types/analysis.js';
 export const MAX_ITERATIONS = 100;
 
 /**
+ * Call site information for a function/constructor
+ * Used for call-site-based parameter type inference
+ */
+export interface CallSiteInfo {
+  /** The call/new expression node */
+  node: t.CallExpression | t.NewExpression;
+  /** Argument types at this call site */
+  argTypes: Type[];
+}
+
+/**
+ * Aggregated call information for a function/constructor
+ * Stores the merged parameter types from all call sites
+ */
+export interface FunctionCallInfo {
+  /** All call sites for this function */
+  callSites: CallSiteInfo[];
+  /** Merged parameter types from all call sites (union of all argument types) */
+  paramTypes: Type[];
+  /** For constructors: the inferred instance type based on paramTypes */
+  instanceType?: Type;
+}
+
+/**
  * Analysis context for iterative inference
  */
 export interface IterativeContext {
@@ -43,6 +67,12 @@ export interface IterativeContext {
   hoistedDeclarations: Map<string, HoistedDeclaration>;
   /** Variables that are modified inside loops (need widening) */
   modifiedInLoops: Set<string>;
+  /**
+   * Call site information for functions/constructors.
+   * Key is the function name, value contains all call sites and merged param types.
+   * This enables call-site-based parameter type inference.
+   */
+  functionCallInfo: Map<string, FunctionCallInfo>;
 }
 
 /**

@@ -79,6 +79,7 @@ export function inferTypesIterative(
     globalEnv,
     hoistedDeclarations,
     modifiedInLoops,
+    functionCallInfo: new Map(),
   };
 
   // Initialize entry state with hoisted declarations
@@ -100,6 +101,7 @@ export function inferTypesIterative(
   const rpo = computeReversePostOrder(cfg);
 
   // Fixed-point iteration
+  // Call site information is collected during iteration and used to refine types
   let changed = true;
   let iterations = 0;
 
@@ -211,6 +213,7 @@ export function analyzeIterative(
     globalEnv,
     hoistedDeclarations,
     modifiedInLoops,
+    functionCallInfo: new Map(),
   };
 
   // Initialize entry state with hoisted declarations
