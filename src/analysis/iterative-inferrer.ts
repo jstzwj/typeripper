@@ -1017,25 +1017,44 @@ function inferFunctionType(
 ): Type {
   const params: Array<ReturnType<typeof Types.param>> = [];
 
+  // Create function-local environment with parameters
+  let funcEnv = createEnv(state.env, 'function');
+
   for (const param of node.params) {
     if (t.isIdentifier(param)) {
       params.push(Types.param(param.name, Types.any()));
+      funcEnv = updateBinding(funcEnv, param.name, Types.any(), 'param', param);
     } else if (t.isRestElement(param) && t.isIdentifier(param.argument)) {
       params.push(Types.param(param.argument.name, Types.array(Types.any()), { rest: true }));
+      funcEnv = updateBinding(funcEnv, param.argument.name, Types.array(Types.any()), 'param', param);
     } else if (t.isAssignmentPattern(param) && t.isIdentifier(param.left)) {
       const defaultType = inferExpression(param.right, state, ctx);
       params.push(Types.param(param.left.name, defaultType, { optional: true }));
+      funcEnv = updateBinding(funcEnv, param.left.name, defaultType, 'param', param);
     } else if (t.isObjectPattern(param) || t.isArrayPattern(param)) {
       params.push(Types.param('_destructured', Types.any()));
     }
   }
 
+  // Collect all variable declarations in function body for return type inference
+  // Also adds annotations for each local variable
+  if (t.isBlockStatement(node.body)) {
+    funcEnv = collectDeclarationsInBlock(node.body, funcEnv, ctx);
+  }
+
+  // Create function-local state
+  const funcState: TypeState = {
+    env: funcEnv,
+    expressionTypes: new Map(),
+    reachable: true,
+  };
+
   let returnType: Type = Types.undefined;
 
   if (t.isBlockStatement(node.body)) {
-    returnType = inferBlockReturnType(node.body, state, ctx);
+    returnType = inferBlockReturnType(node.body, funcState, ctx);
   } else if (t.isExpression(node.body)) {
-    returnType = inferExpression(node.body, state, ctx);
+    returnType = inferExpression(node.body, funcState, ctx);
   }
 
   const isAsync = 'async' in node && node.async;
@@ -1051,6 +1070,127 @@ function inferFunctionType(
     isAsync,
     isGenerator,
   });
+}
+
+/**
+ * Collect all variable declarations in a block (for return type inference)
+ * Also adds annotations for each declaration
+ */
+function collectDeclarationsInBlock(
+  block: t.BlockStatement,
+  env: TypeEnvironment,
+  ctx?: IterativeContext
+): TypeEnvironment {
+  let result = env;
+
+  for (const stmt of block.body) {
+    result = collectDeclarationsInStatement(stmt, result, ctx);
+  }
+
+  return result;
+}
+
+/**
+ * Recursively collect declarations from a statement
+ * Also adds annotations for each declaration
+ */
+function collectDeclarationsInStatement(
+  stmt: t.Statement,
+  env: TypeEnvironment,
+  ctx?: IterativeContext
+): TypeEnvironment {
+  let result = env;
+
+  if (t.isVariableDeclaration(stmt)) {
+    const kind = stmt.kind === 'const' ? 'const' : stmt.kind === 'let' ? 'let' : 'var';
+    for (const decl of stmt.declarations) {
+      if (t.isIdentifier(decl.id)) {
+        // Infer initial type if possible
+        let initType: Type = Types.any();
+        if (decl.init) {
+          if (t.isNumericLiteral(decl.init)) {
+            initType = Types.numberLiteral(decl.init.value);
+          } else if (t.isStringLiteral(decl.init)) {
+            initType = Types.stringLiteral(decl.init.value);
+          } else if (t.isBooleanLiteral(decl.init)) {
+            initType = Types.booleanLiteral(decl.init.value);
+          } else if (t.isNullLiteral(decl.init)) {
+            initType = Types.null;
+          } else if (t.isArrayExpression(decl.init)) {
+            initType = Types.array(Types.any());
+          } else if (t.isObjectExpression(decl.init)) {
+            initType = Types.object({});
+          } else {
+            // For complex expressions, use number/string/any based on common patterns
+            initType = Types.any();
+          }
+        }
+        result = updateBinding(result, decl.id.name, initType, kind, decl);
+
+        // Add annotation for this declaration
+        // Use skipIfExists because transfer() may have already added a more precise type
+        if (ctx) {
+          addAnnotation(ctx, {
+            node: decl.id,
+            name: decl.id.name,
+            type: initType,
+            kind: kind === 'const' ? 'const' : 'variable',
+            skipIfExists: true,
+          });
+        }
+      }
+    }
+  } else if (t.isFunctionDeclaration(stmt) && stmt.id) {
+    result = updateBinding(result, stmt.id.name, Types.function({ params: [], returnType: Types.any() }), 'function', stmt);
+  } else if (t.isForStatement(stmt)) {
+    // Collect declarations in for init
+    if (t.isVariableDeclaration(stmt.init)) {
+      result = collectDeclarationsInStatement(stmt.init, result, ctx);
+    }
+    // Collect declarations in for body
+    if (t.isBlockStatement(stmt.body)) {
+      result = collectDeclarationsInBlock(stmt.body, result, ctx);
+    } else {
+      result = collectDeclarationsInStatement(stmt.body, result, ctx);
+    }
+  } else if (t.isWhileStatement(stmt) || t.isDoWhileStatement(stmt)) {
+    if (t.isBlockStatement(stmt.body)) {
+      result = collectDeclarationsInBlock(stmt.body, result, ctx);
+    } else {
+      result = collectDeclarationsInStatement(stmt.body, result, ctx);
+    }
+  } else if (t.isIfStatement(stmt)) {
+    if (t.isBlockStatement(stmt.consequent)) {
+      result = collectDeclarationsInBlock(stmt.consequent, result, ctx);
+    } else {
+      result = collectDeclarationsInStatement(stmt.consequent, result, ctx);
+    }
+    if (stmt.alternate) {
+      if (t.isBlockStatement(stmt.alternate)) {
+        result = collectDeclarationsInBlock(stmt.alternate, result, ctx);
+      } else {
+        result = collectDeclarationsInStatement(stmt.alternate, result, ctx);
+      }
+    }
+  } else if (t.isTryStatement(stmt)) {
+    result = collectDeclarationsInBlock(stmt.block, result, ctx);
+    if (stmt.handler) {
+      result = collectDeclarationsInBlock(stmt.handler.body, result, ctx);
+    }
+    if (stmt.finalizer) {
+      result = collectDeclarationsInBlock(stmt.finalizer, result, ctx);
+    }
+  } else if (t.isSwitchStatement(stmt)) {
+    for (const c of stmt.cases) {
+      for (const s of c.consequent) {
+        result = collectDeclarationsInStatement(s, result, ctx);
+      }
+    }
+  } else if (t.isBlockStatement(stmt)) {
+    result = collectDeclarationsInBlock(stmt, result, ctx);
+  }
+
+  return result;
 }
 
 /**
@@ -1607,9 +1747,11 @@ function addAnnotation(
     name?: string;
     type: Type;
     kind: AnnotationKind;
+    /** If true, only add if no existing annotation (don't update) */
+    skipIfExists?: boolean;
   }
 ): void {
-  const { node, name, type, kind } = info;
+  const { node, name, type, kind, skipIfExists } = info;
   const loc = node.loc;
   const start = node.start ?? 0;
 
@@ -1618,6 +1760,10 @@ function addAnnotation(
     (a) => a.start === start && a.name === name && a.kind === kind
   );
   if (existing) {
+    if (skipIfExists) {
+      // Don't update, keep the existing (more precise) type
+      return;
+    }
     // Update the type if it changed (for iterative refinement)
     existing.type = type;
     existing.typeString = formatType(type);
