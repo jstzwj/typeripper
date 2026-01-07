@@ -592,3 +592,104 @@ export function typeEquals(a: PolarType, b: PolarType): boolean {
       return false;
   }
 }
+
+// ============================================================================
+// Type to String Conversion
+// ============================================================================
+
+/**
+ * Convert a polar type to a human-readable string representation
+ */
+export function typeToString(type: PolarType, seen: Set<number> = new Set()): string {
+  switch (type.kind) {
+    case 'primitive':
+      if (type.value !== undefined) {
+        // Literal type
+        if (typeof type.value === 'string') {
+          return `"${type.value}"`;
+        }
+        return String(type.value);
+      }
+      return type.name;
+
+    case 'var':
+      return type.name;
+
+    case 'function': {
+      const params = type.params.map(p => {
+        const opt = p.optional ? '?' : '';
+        const rest = p.rest ? '...' : '';
+        return `${rest}${p.name}${opt}: ${typeToString(p.type, seen)}`;
+      }).join(', ');
+      const ret = typeToString(type.returnType, seen);
+      const async = type.isAsync ? 'async ' : '';
+      const gen = type.isGenerator ? '*' : '';
+      return `${async}${gen}(${params}) => ${ret}`;
+    }
+
+    case 'record': {
+      if (type.fields.size === 0 && !type.rest) {
+        return '{}';
+      }
+      const fields = Array.from(type.fields.entries()).map(([name, field]) => {
+        const opt = field.optional ? '?' : '';
+        const ro = field.readonly ? 'readonly ' : '';
+        return `${ro}${name}${opt}: ${typeToString(field.type, seen)}`;
+      });
+      const rest = type.rest ? `...${type.rest.name}` : null;
+      const allFields = rest ? [...fields, rest] : fields;
+      return `{ ${allFields.join(', ')} }`;
+    }
+
+    case 'array':
+      if (type.tuple) {
+        const elements = type.tuple.map(t => typeToString(t, seen));
+        return `[${elements.join(', ')}]`;
+      }
+      return `${typeToString(type.elementType, seen)}[]`;
+
+    case 'union': {
+      if (type.members.length === 0) return 'never';
+      return type.members.map(m => typeToString(m, seen)).join(' | ');
+    }
+
+    case 'intersection': {
+      if (type.members.length === 0) return 'unknown';
+      return type.members.map(m => typeToString(m, seen)).join(' & ');
+    }
+
+    case 'top':
+      return '⊤';
+
+    case 'bottom':
+      return '⊥';
+
+    case 'recursive': {
+      // Prevent infinite recursion
+      if (seen.has(type.binder.id)) {
+        return type.binder.name;
+      }
+      const newSeen = new Set(seen);
+      newSeen.add(type.binder.id);
+      return `μ${type.binder.name}.${typeToString(type.body, newSeen)}`;
+    }
+
+    case 'promise':
+      return `Promise<${typeToString(type.resolvedType, seen)}>`;
+
+    case 'class':
+      return `class ${type.name}`;
+
+    case 'any':
+      return 'any';
+
+    case 'never':
+      return 'never';
+
+    case 'unknown':
+      return 'unknown';
+
+    default:
+      return 'unknown';
+  }
+}

@@ -1,480 +1,621 @@
 /**
- * Type Formatter - Converts types to various output formats
+ * Type Formatter - Converts MLsub PolarTypes to various output formats
  *
  * Supports multiple output formats:
- * 1. Inline comments (like Flow/TypeScript inline annotations)
+ * 1. TypeScript syntax (for .d.ts generation and display)
  * 2. JSON (machine-readable)
- * 3. DTS-like (TypeScript declaration style)
- * 4. Report (human-readable analysis report)
+ * 3. DTS (TypeScript declaration file)
+ * 4. Inline (source code with type comments)
+ * 5. Report (human-readable analysis)
  */
 
-import type { Type, ObjectType, FunctionType, ArrayType, ClassType } from '../types/index.js';
-import type { TypeAnnotation, TypeAnnotationResult, OutputOptions } from '../types/annotation.js';
+import type { PolarType, FunctionType, RecordType, ArrayType, FieldType } from '../inference/types/polar.js';
+import type { ProgramInferenceResult } from '../inference/inferrer/infer.js';
+import { typeToString } from '../inference/types/polar.js';
+
+// Re-export types from inference module for convenience
+export type {
+  ProgramInferenceResult,
+  InferenceError,
+} from '../inference/inferrer/infer.js';
+
+// ============================================================================
+// Format Options
+// ============================================================================
 
 /**
- * Format options for detailed type output
+ * Options for type formatting
  */
 export interface FormatOptions {
-  /** Maximum depth for nested types */
+  /** Maximum depth for nested types (default: 10) */
   maxDepth?: number;
-  /** Whether to show optional properties with ? */
+  /** Whether to show optional properties with ? (default: true) */
   showOptional?: boolean;
-  /** Whether to expand type aliases */
-  expandAliases?: boolean;
-  /** Line width for wrapping */
+  /** Line width for wrapping (default: 80) */
   lineWidth?: number;
-  /** Current indentation level */
-  indentLevel?: number;
   /** Indentation string (default: '  ') */
   indentStr?: string;
+  /** Whether to show verbose details (default: false) */
+  verbose?: boolean;
 }
 
-const DEFAULT_FORMAT_OPTIONS: Required<FormatOptions> = {
-  maxDepth: 5,
+const DEFAULT_OPTIONS: Required<FormatOptions> = {
+  maxDepth: 10,
   showOptional: true,
-  expandAliases: true,
   lineWidth: 80,
-  indentLevel: 0,
   indentStr: '  ',
+  verbose: false,
 };
 
+// ============================================================================
+// Type to TypeScript
+// ============================================================================
+
 /**
- * Format a type to a detailed string representation
+ * Convert a PolarType to TypeScript syntax
  */
-export function formatType(type: Type, options: FormatOptions = {}): string {
-  const opts = { ...DEFAULT_FORMAT_OPTIONS, ...options };
-  return formatTypeInternal(type, opts, 0, new Set());
+export function typeToTypeScript(type: PolarType, options: FormatOptions = {}): string {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  return formatTypeTS(type, opts, 0, new Set());
 }
 
-function formatTypeInternal(
-  type: Type,
+function formatTypeTS(
+  type: PolarType,
   opts: Required<FormatOptions>,
   depth: number,
-  seen: Set<string>
+  seen: Set<number>
 ): string {
-  // Prevent infinite recursion for recursive types
+  // Prevent infinite recursion
   if (depth > opts.maxDepth) {
     return '...';
   }
 
-  if (seen.has(type.id)) {
-    return `<circular: ${type.id}>`;
-  }
-
   switch (type.kind) {
-    case 'undefined':
-      return 'undefined';
-    case 'null':
-      return 'null';
-    case 'boolean':
-      return type.value !== undefined ? String(type.value) : 'boolean';
-    case 'number':
-      return type.value !== undefined ? String(type.value) : 'number';
-    case 'string':
-      return type.value !== undefined ? JSON.stringify(type.value) : 'string';
-    case 'bigint':
-      return type.value !== undefined ? `${type.value}n` : 'bigint';
-    case 'symbol':
-      return type.description ? `unique symbol /* ${type.description} */` : 'symbol';
+    case 'primitive':
+      if (type.value !== undefined) {
+        // Literal type
+        if (typeof type.value === 'string') {
+          return `"${type.value}"`;
+        }
+        return String(type.value);
+      }
+      // Map primitive names to TypeScript types
+      switch (type.name) {
+        case 'boolean': return 'boolean';
+        case 'null': return 'null';
+        case 'undefined': return 'undefined';
+        case 'bigint': return 'bigint';
+        case 'symbol': return 'symbol';
+        case 'number': return 'number';
+        case 'string': return 'string';
+      }
+
+    case 'var':
+      // Type variable - use name or unknown
+      return type.name || 'unknown';
+
     case 'function':
-      return formatFunctionTypeDetailed(type, opts, depth, seen);
-    case 'object':
-      return formatObjectTypeDetailed(type, opts, depth, seen);
+      return formatFunctionTS(type, opts, depth, seen);
+
+    case 'record':
+      return formatRecordTS(type, opts, depth, seen);
+
     case 'array':
-      return formatArrayTypeDetailed(type, opts, depth, seen);
+      return formatArrayTS(type, opts, depth, seen);
+
+    case 'union': {
+      if (type.members.length === 0) return 'never';
+      const members = type.members.map(m => formatTypeTS(m, opts, depth, seen));
+      // Deduplicate
+      const unique = [...new Set(members)];
+      return unique.join(' | ');
+    }
+
+    case 'intersection': {
+      if (type.members.length === 0) return 'unknown';
+      const members = type.members.map(m => formatTypeTS(m, opts, depth, seen));
+      const unique = [...new Set(members)];
+      return unique.join(' & ');
+    }
+
+    case 'promise':
+      return `Promise<${formatTypeTS(type.resolvedType, opts, depth + 1, seen)}>`;
+
     case 'class':
-      return formatClassTypeDetailed(type, opts, depth, seen);
-    case 'union':
-      return formatUnionType(type.members, opts, depth, seen);
-    case 'intersection':
-      return type.members.map((m) => formatTypeInternal(m, opts, depth, seen)).join(' & ');
+      return type.name;
+
+    case 'top':
+      return 'unknown';
+
+    case 'bottom':
+      return 'never';
+
     case 'any':
-      return type.reason ? `any /* ${type.reason} */` : 'any';
+      return 'any';
+
     case 'never':
       return 'never';
+
     case 'unknown':
       return 'unknown';
-    case 'typevar':
-      return type.name;
-    case 'promise':
-      return `Promise<${formatTypeInternal(type.resolvedType, opts, depth + 1, seen)}>`;
-    case 'iterator':
-      return `Generator<${formatTypeInternal(type.yieldType, opts, depth + 1, seen)}, ${formatTypeInternal(type.returnType, opts, depth + 1, seen)}, ${formatTypeInternal(type.nextType, opts, depth + 1, seen)}>`;
+
+    case 'recursive':
+      // For recursive types, just use the body type
+      return formatTypeTS(type.body, opts, depth + 1, seen);
+
     default:
       return 'unknown';
   }
 }
 
-function formatFunctionTypeDetailed(
+function formatFunctionTS(
   type: FunctionType,
   opts: Required<FormatOptions>,
   depth: number,
-  seen: Set<string>
+  seen: Set<number>
 ): string {
-  const newSeen = new Set(seen);
-  newSeen.add(type.id);
+  const params = type.params.map((p, i) => {
+    const opt = p.optional ? '?' : '';
+    const rest = p.rest ? '...' : '';
+    const name = p.name || `arg${i}`;
+    const paramType = formatTypeTS(p.type, opts, depth + 1, seen);
+    return `${rest}${name}${opt}: ${rest ? `${paramType}[]` : paramType}`;
+  }).join(', ');
 
-  const params = type.params.map((p) => {
-    let paramStr = p.rest ? '...' : '';
-    paramStr += p.name;
-    if (p.optional && opts.showOptional) paramStr += '?';
-    paramStr += ': ' + formatTypeInternal(p.type, opts, depth + 1, newSeen);
-    return paramStr;
-  });
-
-  const returnStr = formatTypeInternal(type.returnType, opts, depth + 1, newSeen);
-
-  let prefix = '';
-  if (type.isAsync) prefix = 'async ';
-  if (type.isGenerator) {
-    return `${prefix}function*(${params.join(', ')}): ${returnStr}`;
-  }
-
-  return `${prefix}(${params.join(', ')}) => ${returnStr}`;
+  const ret = formatTypeTS(type.returnType, opts, depth + 1, seen);
+  return `(${params}) => ${ret}`;
 }
 
-function formatObjectTypeDetailed(
-  type: ObjectType,
+function formatRecordTS(
+  type: RecordType,
   opts: Required<FormatOptions>,
   depth: number,
-  seen: Set<string>
+  seen: Set<number>
 ): string {
-  const newSeen = new Set(seen);
-  newSeen.add(type.id);
-
-  if (type.properties.size === 0 && !type.indexSignature) {
-    return '{}';
+  if (type.fields.size === 0) {
+    return type.rest ? 'Record<string, unknown>' : '{}';
   }
 
-  const indent = opts.indentStr.repeat(depth + 1);
-  const closingIndent = opts.indentStr.repeat(depth);
+  const fields = Array.from(type.fields.entries()).map(([name, field]) => {
+    const opt = field.optional ? '?' : '';
+    const ro = field.readonly ? 'readonly ' : '';
+    return `${ro}${name}${opt}: ${formatTypeTS(field.type, opts, depth + 1, seen)}`;
+  });
 
-  const props: string[] = [];
-
-  // Regular properties
-  for (const [key, prop] of type.properties) {
-    const keyStr = isValidIdentifier(key) ? key : JSON.stringify(key);
-    const readonly = prop.writable ? '' : 'readonly ';
-    const optional = !prop.writable && opts.showOptional ? '?' : '';
-    const typeStr = formatTypeInternal(prop.type, opts, depth + 1, newSeen);
-
-    if (prop.getter && prop.setter) {
-      props.push(`${indent}${readonly}${keyStr}${optional}: ${typeStr} /* get/set */`);
-    } else if (prop.getter) {
-      props.push(`${indent}get ${keyStr}(): ${typeStr}`);
-    } else if (prop.setter) {
-      props.push(`${indent}set ${keyStr}(value: ${typeStr})`);
-    } else {
-      props.push(`${indent}${readonly}${keyStr}${optional}: ${typeStr}`);
-    }
-  }
-
-  // Index signature
-  if (type.indexSignature) {
-    const keyType = formatTypeInternal(type.indexSignature.key, opts, depth + 1, newSeen);
-    const valueType = formatTypeInternal(type.indexSignature.value, opts, depth + 1, newSeen);
-    props.push(`${indent}[key: ${keyType}]: ${valueType}`);
-  }
-
-  // Check if we should format inline or multiline
-  const inlineStr = `{ ${props.map((p) => p.trim()).join('; ')} }`;
-  if (inlineStr.length <= opts.lineWidth && props.length <= 3) {
-    return inlineStr;
-  }
-
-  return `{\n${props.join(';\n')};\n${closingIndent}}`;
+  return `{ ${fields.join('; ')} }`;
 }
 
-function formatArrayTypeDetailed(
+function formatArrayTS(
   type: ArrayType,
   opts: Required<FormatOptions>,
   depth: number,
-  seen: Set<string>
+  seen: Set<number>
 ): string {
-  const newSeen = new Set(seen);
-  newSeen.add(type.id);
-
-  // Tuple type
-  if (type.tuple && type.tuple.length > 0) {
-    const elements = type.tuple.map((t) => formatTypeInternal(t, opts, depth + 1, newSeen));
-
-    // Check if inline or multiline
-    const inlineStr = `[${elements.join(', ')}]`;
-    if (inlineStr.length <= opts.lineWidth || elements.length <= 4) {
-      return inlineStr;
-    }
-
-    const indent = opts.indentStr.repeat(depth + 1);
-    const closingIndent = opts.indentStr.repeat(depth);
-    return `[\n${indent}${elements.join(',\n' + indent)}\n${closingIndent}]`;
+  if (type.tuple) {
+    const elements = type.tuple.map(t => formatTypeTS(t, opts, depth + 1, seen));
+    return `[${elements.join(', ')}]`;
   }
-
-  // Regular array
-  const elementStr = formatTypeInternal(type.elementType, opts, depth + 1, newSeen);
-
-  // Use Array<T> syntax for complex element types
-  if (type.elementType.kind === 'union' || type.elementType.kind === 'function') {
-    return `Array<${elementStr}>`;
-  }
-
-  return `${elementStr}[]`;
+  return `${formatTypeTS(type.elementType, opts, depth + 1, seen)}[]`;
 }
 
-function formatClassTypeDetailed(
-  type: ClassType,
-  opts: Required<FormatOptions>,
-  depth: number,
-  seen: Set<string>
-): string {
-  const newSeen = new Set(seen);
-  newSeen.add(type.id);
+// ============================================================================
+// Program Inference Result Types
+// ============================================================================
 
-  const indent = opts.indentStr.repeat(depth + 1);
-  const closingIndent = opts.indentStr.repeat(depth);
-
-  const parts: string[] = [];
-
-  // Class name and extends
-  let header = `class ${type.name}`;
-  if (type.superClass) {
-    header += ` extends ${type.superClass.name}`;
-  }
-
-  // Static properties
-  for (const [key, prop] of type.staticProperties) {
-    const typeStr = formatTypeInternal(prop.type, opts, depth + 1, newSeen);
-    parts.push(`${indent}static ${key}: ${typeStr}`);
-  }
-
-  // Constructor
-  const ctorParams = type.constructor.params
-    .map((p) => {
-      let s = p.rest ? '...' : '';
-      s += p.name;
-      if (p.optional) s += '?';
-      s += ': ' + formatTypeInternal(p.type, opts, depth + 1, newSeen);
-      return s;
-    })
-    .join(', ');
-  parts.push(`${indent}constructor(${ctorParams})`);
-
-  // Instance properties
-  for (const [key, prop] of type.instanceType.properties) {
-    const typeStr = formatTypeInternal(prop.type, opts, depth + 1, newSeen);
-    if (prop.type.kind === 'function') {
-      // Format as method
-      const funcType = prop.type as FunctionType;
-      const methodParams = funcType.params
-        .map((p) => `${p.name}: ${formatTypeInternal(p.type, opts, depth + 1, newSeen)}`)
-        .join(', ');
-      const returnStr = formatTypeInternal(funcType.returnType, opts, depth + 1, newSeen);
-      parts.push(`${indent}${key}(${methodParams}): ${returnStr}`);
-    } else {
-      parts.push(`${indent}${key}: ${typeStr}`);
-    }
-  }
-
-  return `${header} {\n${parts.join(';\n')};\n${closingIndent}}`;
-}
-
-function formatUnionType(
-  members: readonly Type[],
-  opts: Required<FormatOptions>,
-  depth: number,
-  seen: Set<string>
-): string {
-  // Simplify common patterns
-  const hasNull = members.some((m) => m.kind === 'null');
-  const hasUndefined = members.some((m) => m.kind === 'undefined');
-  const others = members.filter((m) => m.kind !== 'null' && m.kind !== 'undefined');
-
-  if (others.length === 1 && (hasNull || hasUndefined)) {
-    const baseType = formatTypeInternal(others[0]!, opts, depth, seen);
-    if (hasNull && hasUndefined) {
-      return `${baseType} | null | undefined`;
-    } else if (hasNull) {
-      return `${baseType} | null`;
-    } else {
-      return `${baseType} | undefined`;
-    }
-  }
-
-  const formatted = members.map((m) => formatTypeInternal(m, opts, depth, seen));
-
-  // Wrap complex union members in parentheses
-  return formatted
-    .map((s, i) => {
-      const member = members[i]!;
-      if (member.kind === 'function' || member.kind === 'intersection') {
-        return `(${s})`;
-      }
-      return s;
-    })
-    .join(' | ');
-}
-
-function isValidIdentifier(s: string): boolean {
-  return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(s);
-}
+// Types are re-exported from inference module above
 
 /**
- * Format annotation result to inline commented source
+ * Inference result for a single binding
  */
-export function formatAsInlineComments(result: TypeAnnotationResult): string {
-  const lines = result.source.split('\n');
-  const annotations = [...result.annotations].sort((a, b) => b.line - a.line);
+export interface InferredBinding {
+  name: string;
+  type: PolarType;
+}
 
-  // Group annotations by line
-  const lineAnnotations = new Map<number, TypeAnnotation[]>();
-  for (const ann of annotations) {
-    const existing = lineAnnotations.get(ann.line) ?? [];
-    existing.push(ann);
-    lineAnnotations.set(ann.line, existing);
-  }
+// ============================================================================
+// Report Format
+// ============================================================================
 
-  // Insert annotations as comments
-  const output: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const lineNum = i + 1;
-    const anns = lineAnnotations.get(lineNum);
+/**
+ * Format inference result as a human-readable report
+ */
+export function formatReport(result: ProgramInferenceResult, options: FormatOptions = {}): string {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const lines: string[] = [];
 
-    if (anns && anns.length > 0) {
-      // Format annotations for this line
-      const comments = anns
-        .filter((a) => a.kind !== 'expression') // Skip expression types by default
-        .map((a) => {
-          const name = a.name ? `${a.name}: ` : '';
-          return `/* ${name}${a.typeString} */`;
-        });
+  lines.push('='.repeat(60));
+  lines.push('Type Inference Results');
+  lines.push('='.repeat(60));
+  lines.push('');
 
-      if (comments.length > 0) {
-        output.push(lines[i] + ' ' + comments.join(' '));
+  if (result.bindings.size === 0) {
+    lines.push('No type bindings found.');
+  } else {
+    lines.push('Inferred Types:');
+    lines.push('-'.repeat(40));
+
+    // Group bindings by kind
+    const functions: [string, PolarType][] = [];
+    const classes: [string, PolarType][] = [];
+    const variables: [string, PolarType][] = [];
+
+    for (const [name, type] of result.bindings) {
+      if (type.kind === 'function') {
+        functions.push([name, type]);
+      } else if (type.kind === 'class') {
+        classes.push([name, type]);
       } else {
-        output.push(lines[i]!);
+        variables.push([name, type]);
       }
-    } else {
-      output.push(lines[i]!);
+    }
+
+    if (variables.length > 0) {
+      lines.push('\n  Variables:');
+      for (const [name, type] of variables) {
+        const typeStr = typeToString(type);
+        lines.push(`    ${name}: ${typeStr}`);
+        if (opts.verbose && type.kind !== 'primitive' && type.kind !== 'var') {
+          lines.push(`      (kind: ${type.kind})`);
+        }
+      }
+    }
+
+    if (functions.length > 0) {
+      lines.push('\n  Functions:');
+      for (const [name, type] of functions) {
+        const typeStr = typeToString(type);
+        lines.push(`    ${name}: ${typeStr}`);
+      }
+    }
+
+    if (classes.length > 0) {
+      lines.push('\n  Classes:');
+      for (const [name, type] of classes) {
+        const typeStr = typeToString(type);
+        lines.push(`    ${name}: ${typeStr}`);
+      }
     }
   }
 
-  return output.join('\n');
-}
-
-/**
- * Format annotation result as JSON
- */
-export function formatAsJSON(result: TypeAnnotationResult, indent = 2): string {
-  const serializable = {
-    filename: result.filename,
-    annotations: result.annotations.map((a) => ({
-      line: a.line,
-      column: a.column,
-      kind: a.kind,
-      name: a.name,
-      type: a.typeString,
-    })),
-    errors: result.errors,
-  };
-  return JSON.stringify(serializable, null, indent);
-}
-
-/**
- * Format annotation result as TypeScript declaration (.d.ts style)
- */
-export function formatAsDTS(result: TypeAnnotationResult): string {
-  const lines: string[] = [];
-  lines.push(`// Type declarations for ${result.filename}`);
   lines.push('');
 
-  // Group by kind
-  const variables = result.annotations.filter((a) => a.kind === 'variable' || a.kind === 'const');
-  const functions = result.annotations.filter((a) => a.kind === 'function');
-  const classes = result.annotations.filter((a) => a.kind === 'class');
-
-  // Variables
-  for (const v of variables) {
-    const keyword = v.kind === 'const' ? 'const' : 'let';
-    lines.push(`declare ${keyword} ${v.name}: ${v.typeString};`);
-  }
-
-  if (variables.length > 0) lines.push('');
-
-  // Functions
-  for (const f of functions) {
-    lines.push(`declare function ${f.name}${f.typeString};`);
-  }
-
-  if (functions.length > 0) lines.push('');
-
-  // Classes
-  for (const c of classes) {
-    lines.push(`declare ${c.typeString}`);
-  }
-
-  return lines.join('\n');
-}
-
-/**
- * Format annotation result as human-readable report
- */
-export function formatAsReport(result: TypeAnnotationResult): string {
-  const lines: string[] = [];
-
-  lines.push('═══════════════════════════════════════════════════════════════');
-  lines.push(`  Type Inference Report: ${result.filename}`);
-  lines.push('═══════════════════════════════════════════════════════════════');
-  lines.push('');
-
-  // Summary
-  const counts = {
-    variables: result.annotations.filter((a) => a.kind === 'variable' || a.kind === 'const').length,
-    functions: result.annotations.filter((a) => a.kind === 'function').length,
-    parameters: result.annotations.filter((a) => a.kind === 'parameter').length,
-    classes: result.annotations.filter((a) => a.kind === 'class').length,
-    errors: result.errors.length,
-  };
-
-  lines.push('  Summary:');
-  lines.push(`    Variables:  ${counts.variables}`);
-  lines.push(`    Functions:  ${counts.functions}`);
-  lines.push(`    Parameters: ${counts.parameters}`);
-  lines.push(`    Classes:    ${counts.classes}`);
-  lines.push(`    Errors:     ${counts.errors}`);
-  lines.push('');
-
-  // Errors first
   if (result.errors.length > 0) {
-    lines.push('───────────────────────────────────────────────────────────────');
-    lines.push('  Errors:');
-    lines.push('───────────────────────────────────────────────────────────────');
-    for (const err of result.errors) {
-      lines.push(`    Line ${err.line}:${err.column} - ${err.message}`);
+    lines.push('Type Errors:');
+    lines.push('-'.repeat(40));
+    for (const error of result.errors) {
+      lines.push(`  - ${error.message}`);
+      if (error.location) {
+        lines.push(`     at ${error.location.file}:${error.location.line}:${error.location.column}`);
+      }
+    }
+  } else {
+    lines.push('No type errors detected');
+  }
+
+  return lines.join('\n');
+}
+
+// ============================================================================
+// JSON Format
+// ============================================================================
+
+/**
+ * Get detailed type information for JSON output
+ */
+function getTypeDetails(type: PolarType): Record<string, unknown> | null {
+  switch (type.kind) {
+    case 'function':
+      return {
+        params: type.params.map(p => ({
+          name: p.name,
+          type: typeToString(p.type),
+          optional: p.optional,
+          rest: p.rest,
+        })),
+        returnType: typeToString(type.returnType),
+        isAsync: type.isAsync,
+        isGenerator: type.isGenerator,
+      };
+    case 'record':
+      return {
+        fields: Object.fromEntries(
+          Array.from(type.fields.entries()).map(([name, field]) => [
+            name,
+            {
+              type: typeToString(field.type),
+              optional: field.optional,
+              readonly: field.readonly,
+            }
+          ])
+        ),
+      };
+    case 'array':
+      return {
+        elementType: typeToString(type.elementType),
+        isTuple: !!type.tuple,
+      };
+    case 'union':
+      return {
+        members: type.members.map(m => typeToString(m)),
+      };
+    case 'intersection':
+      return {
+        members: type.members.map(m => typeToString(m)),
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Format inference result as JSON
+ */
+export function formatJSON(result: ProgramInferenceResult): string {
+  const jsonOutput = {
+    success: result.success,
+    bindings: Object.fromEntries(
+      Array.from(result.bindings.entries()).map(([name, type]) => [
+        name,
+        {
+          type: typeToString(type),
+          kind: type.kind,
+          details: getTypeDetails(type),
+        }
+      ])
+    ),
+    errors: result.errors.map(e => ({
+      message: e.message,
+      location: e.location,
+    })),
+    statistics: {
+      totalBindings: result.bindings.size,
+      errorCount: result.errors.length,
+    },
+  };
+  return JSON.stringify(jsonOutput, null, 2);
+}
+
+// ============================================================================
+// DTS Format (TypeScript Declaration)
+// ============================================================================
+
+/**
+ * Check if a string is a valid JS identifier
+ */
+function isValidIdentifier(name: string): boolean {
+  return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
+}
+
+/**
+ * Check if a variable name is internal (loop variable, temp, etc.)
+ */
+function isInternalVariable(name: string): boolean {
+  const internal = ['i', 'j', 'k', 'n', '_', 'tmp', 'temp'];
+  return internal.includes(name) || name.startsWith('_');
+}
+
+/**
+ * Format a function type as a TypeScript function declaration
+ */
+function formatFunctionDeclaration(name: string, type: FunctionType, options: FormatOptions = {}): string {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+
+  const asyncPrefix = type.isAsync ? 'async ' : '';
+  const genSuffix = type.isGenerator ? ' (generator)' : '';
+
+  const params = type.params.map((p, i) => {
+    const opt = p.optional ? '?' : '';
+    const rest = p.rest ? '...' : '';
+    const paramName = p.name || `arg${i}`;
+    const paramType = typeToTypeScript(p.type, opts);
+    return `${rest}${paramName}${opt}: ${rest ? `${paramType}[]` : paramType}`;
+  }).join(', ');
+
+  const returnType = typeToTypeScript(type.returnType, opts);
+
+  return `declare ${asyncPrefix}function ${name}(${params}): ${returnType};${genSuffix ? ` // ${genSuffix}` : ''}`;
+}
+
+/**
+ * Format inference result as TypeScript declaration file
+ */
+export function formatDTS(result: ProgramInferenceResult, filePath: string, options: FormatOptions = {}): string {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const lines: string[] = [];
+
+  const fileName = filePath.replace(/^.*[\\/]/, '').replace(/\.js$/, '');
+
+  lines.push(`// Type definitions for ${fileName}`);
+  lines.push(`// Generated by Typeripper MLsub type inference`);
+  lines.push(`// Source: ${filePath}`);
+  lines.push('');
+
+  if (result.errors.length > 0) {
+    lines.push('// Type errors were detected during inference:');
+    for (const error of result.errors) {
+      lines.push(`//   - ${error.message}`);
     }
     lines.push('');
   }
 
-  // Detailed annotations by category
-  lines.push('───────────────────────────────────────────────────────────────');
-  lines.push('  Inferred Types:');
-  lines.push('───────────────────────────────────────────────────────────────');
-  lines.push('');
+  // Separate declarations by type
+  const functions: [string, PolarType][] = [];
+  const classes: [string, PolarType][] = [];
+  const variables: [string, PolarType][] = [];
 
-  // Group by scope/function
-  const sorted = [...result.annotations].sort((a, b) => a.line - b.line);
+  for (const [name, type] of result.bindings) {
+    // Skip internal/loop variables
+    if (isInternalVariable(name)) continue;
 
-  for (const ann of sorted) {
-    if (ann.kind === 'expression') continue; // Skip expressions in report
+    if (type.kind === 'function') {
+      functions.push([name, type]);
+    } else if (type.kind === 'class') {
+      classes.push([name, type]);
+    } else {
+      variables.push([name, type]);
+    }
+  }
 
-    const location = `${ann.line}:${ann.column}`.padEnd(8);
-    const kind = ann.kind.padEnd(12);
-    const name = (ann.name ?? '(anonymous)').padEnd(20);
-
-    lines.push(`  ${location} ${kind} ${name}`);
-    lines.push(`             └─ ${ann.typeString}`);
+  // Output variable declarations
+  if (variables.length > 0) {
+    lines.push('// Variables');
+    for (const [name, type] of variables) {
+      if (isValidIdentifier(name)) {
+        lines.push(`declare const ${name}: ${typeToTypeScript(type, opts)};`);
+      }
+    }
     lines.push('');
   }
 
-  lines.push('═══════════════════════════════════════════════════════════════');
+  // Output function declarations
+  if (functions.length > 0) {
+    lines.push('// Functions');
+    for (const [name, type] of functions) {
+      if (isValidIdentifier(name) && type.kind === 'function') {
+        lines.push(formatFunctionDeclaration(name, type, opts));
+      }
+    }
+    lines.push('');
+  }
+
+  // Output class declarations
+  if (classes.length > 0) {
+    lines.push('// Classes');
+    for (const [name, type] of classes) {
+      if (isValidIdentifier(name)) {
+        lines.push(`declare class ${name} {`);
+        lines.push(`  constructor(...args: any[]): ${name};`);
+        lines.push(`}`);
+        lines.push('');
+      }
+    }
+  }
+
+  // Export declarations
+  const exportedNames = [...variables, ...functions, ...classes]
+    .map(([name]) => name)
+    .filter(isValidIdentifier)
+    .filter(name => !isInternalVariable(name));
+
+  if (exportedNames.length > 0) {
+    lines.push('// Exports');
+    lines.push(`export { ${exportedNames.join(', ')} };`);
+  }
 
   return lines.join('\n');
+}
+
+// ============================================================================
+// Inline Format (Source with Type Comments)
+// ============================================================================
+
+/**
+ * Format inference result as source code with inline type comments
+ */
+export function formatInline(result: ProgramInferenceResult, source: string): string {
+  const lines = source.split('\n');
+  const bindings = result.bindings;
+
+  // Build a map of variable declarations to their types
+  const typeAnnotations = new Map<string, string>();
+  for (const [name, type] of bindings) {
+    typeAnnotations.set(name, typeToString(type));
+  }
+
+  // Patterns to match declarations
+  const constLetVarPattern = /^(\s*)(const|let|var)\s+(\w+)\s*=/;
+  const functionDeclPattern = /^(\s*)function\s+(\w+)\s*\(/;
+  const arrowFuncPattern = /^(\s*)(const|let|var)\s+(\w+)\s*=\s*(\([^)]*\)|[a-zA-Z_$][a-zA-Z0-9_$]*)\s*=>/;
+  const classPattern = /^(\s*)class\s+(\w+)/;
+
+  const outputLines: string[] = [];
+
+  outputLines.push('// ============================================================');
+  outputLines.push('// Type-annotated source code');
+  outputLines.push('// Generated by Typeripper MLsub type inference');
+  outputLines.push('// ============================================================');
+  outputLines.push('');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+
+    // Try to match different declaration patterns
+    let match: RegExpMatchArray | null;
+    let annotation = '';
+
+    // Arrow function assignment
+    match = line.match(arrowFuncPattern);
+    if (match) {
+      const name = match[3]!;
+      const type = typeAnnotations.get(name);
+      if (type) {
+        annotation = ` /* : ${type} */`;
+      }
+      const insertPos = line.indexOf('=');
+      if (insertPos > 0 && annotation) {
+        outputLines.push(line.slice(0, insertPos) + annotation + line.slice(insertPos));
+        continue;
+      }
+    }
+
+    // Regular variable declaration
+    match = line.match(constLetVarPattern);
+    if (match && !arrowFuncPattern.test(line)) {
+      const name = match[3]!;
+      const type = typeAnnotations.get(name);
+      if (type) {
+        annotation = ` /* : ${type} */`;
+      }
+      const insertPos = line.indexOf('=');
+      if (insertPos > 0 && annotation) {
+        outputLines.push(line.slice(0, insertPos) + annotation + line.slice(insertPos));
+        continue;
+      }
+    }
+
+    // Function declaration
+    match = line.match(functionDeclPattern);
+    if (match) {
+      const name = match[2]!;
+      const type = typeAnnotations.get(name);
+      if (type) {
+        annotation = ` /* : ${type} */`;
+        const funcNameEnd = line.indexOf(name) + name.length;
+        outputLines.push(line.slice(0, funcNameEnd) + annotation + line.slice(funcNameEnd));
+        continue;
+      }
+    }
+
+    // Class declaration
+    match = line.match(classPattern);
+    if (match) {
+      const name = match[2]!;
+      const type = typeAnnotations.get(name);
+      if (type) {
+        annotation = ` /* : ${type} */`;
+        const classNameEnd = line.indexOf(name) + name.length;
+        outputLines.push(line.slice(0, classNameEnd) + annotation + line.slice(classNameEnd));
+        continue;
+      }
+    }
+
+    // No annotation needed, output original line
+    outputLines.push(line);
+  }
+
+  // Output type errors as comments at the end
+  if (result.errors.length > 0) {
+    outputLines.push('');
+    outputLines.push('// ============================================================');
+    outputLines.push('// Type Errors');
+    outputLines.push('// ============================================================');
+    for (const error of result.errors) {
+      outputLines.push(`// - ${error.message}`);
+      if (error.location) {
+        outputLines.push(`//    at line ${error.location.line}, column ${error.location.column}`);
+      }
+    }
+  }
+
+  return outputLines.join('\n');
 }

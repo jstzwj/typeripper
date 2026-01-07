@@ -44,12 +44,3 @@ export {
 
 // Biunification
 export { BiunificationContext, biunify, isSubtype } from './biunify.js';
-
-// Z3 backend (optional)
-export {
-  initZ3,
-  isZ3Available,
-  Z3Solver,
-  getZ3Solver,
-  solveWithZ3,
-} from './z3-backend.js';

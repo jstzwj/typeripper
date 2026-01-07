@@ -7,43 +7,39 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from '../src/parser/index.js';
-import { inferTypes, analyzeIterative } from '../src/analysis/index.js';
+import { inferProgram } from '../src/inference/inferrer/infer.js';
 import {
-  formatAsReport,
-  formatAsInlineComments,
-  formatAsDTS,
-  formatAsJSON
+  formatReport,
+  formatJSON,
+  formatDTS,
+  formatInline,
 } from '../src/output/index.js';
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
 
 function main() {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
-    console.log('Usage: npx tsx scripts/infer.ts <file.js> [options]');
-    console.log('');
-    console.log('Options:');
-    console.log('  --format=report   Human-readable analysis report (default)');
-    console.log('  --format=json     Machine-readable JSON output');
-    console.log('  --format=dts      TypeScript declaration file format');
-    console.log('  --format=inline   Source code with inline type comments');
-    console.log('  --simple          Use simple single-pass analysis (default: iterative)');
-    console.log('  --verbose         Show CFG statistics (iterative mode only)');
+    printUsage();
     process.exit(1);
   }
 
   // Parse arguments
   let filePath = '';
   let format = 'report';
-  let useSimple = false;
   let verbose = false;
 
   for (const arg of args) {
     if (arg.startsWith('--format=')) {
       format = arg.slice('--format='.length);
-    } else if (arg === '--simple') {
-      useSimple = true;
-    } else if (arg === '--verbose') {
+    } else if (arg === '--verbose' || arg === '-v') {
       verbose = true;
+    } else if (arg === '--help' || arg === '-h') {
+      printUsage();
+      process.exit(0);
     } else if (!arg.startsWith('-')) {
       filePath = arg;
     }
@@ -51,6 +47,14 @@ function main() {
 
   if (!filePath) {
     console.error('Error: No file path provided');
+    process.exit(1);
+  }
+
+  // Validate format
+  const validFormats = ['report', 'json', 'dts', 'inline'];
+  if (!validFormats.includes(format)) {
+    console.error(`Error: Invalid format '${format}'`);
+    console.error(`Valid formats: ${validFormats.join(', ')}`);
     process.exit(1);
   }
 
@@ -79,53 +83,66 @@ function main() {
 
   // Run type inference
   const startTime = Date.now();
-  let result;
+  console.error('Running MLsub type inference...');
 
-  if (useSimple) {
-    console.error('Running simple (single-pass) type inference...');
-    result = inferTypes(ast, source, filePath);
-  } else {
-    console.error('Running iterative type inference...');
-    const iterResult = analyzeIterative(ast, source, filePath);
-    result = iterResult;
-
-    if (verbose) {
-      console.error('');
-      console.error('CFG Statistics:');
-      console.error(`  Blocks: ${iterResult.cfg.blocks.size}`);
-      console.error(`  Edges: ${iterResult.cfg.edges.size}`);
-      console.error(`  Back edges (loops): ${iterResult.cfg.backEdges.size}`);
-      console.error(`  Iterations to converge: ${iterResult.iterations}`);
-    }
-  }
+  const result = inferProgram(ast.program);
 
   const elapsed = Date.now() - startTime;
   console.error(`Analysis completed in ${elapsed}ms`);
-  console.error(`Found ${result.annotations.length} type annotations`);
-  if (result.errors.length > 0) {
+  console.error(`Found ${result.bindings.size} type bindings`);
+
+  if (!result.success) {
     console.error(`Found ${result.errors.length} type errors`);
+    for (const error of result.errors) {
+      console.error(`  - ${error.message}`);
+      if (error.location) {
+        console.error(`    at ${error.location.file}:${error.location.line}:${error.location.column}`);
+      }
+    }
   }
   console.error('');
 
-  // Format output
-  let output: string;
+  // Format output using the output module
   switch (format) {
     case 'json':
-      output = formatAsJSON(result);
+      console.log(formatJSON(result));
       break;
     case 'dts':
-      output = formatAsDTS(result);
+      console.log(formatDTS(result, filePath));
       break;
     case 'inline':
-      output = formatAsInlineComments(result);
+      console.log(formatInline(result, source));
       break;
     case 'report':
     default:
-      output = formatAsReport(result);
+      console.log(formatReport(result, { verbose }));
       break;
   }
-
-  console.log(output);
 }
+
+// ============================================================================
+// Usage
+// ============================================================================
+
+function printUsage() {
+  console.log('Usage: npx tsx scripts/infer.ts <file.js> [options]');
+  console.log('');
+  console.log('Options:');
+  console.log('  --format=report   Human-readable analysis report (default)');
+  console.log('  --format=json     Machine-readable JSON output');
+  console.log('  --format=dts      TypeScript declaration file format');
+  console.log('  --format=inline   Source code with inline type comments');
+  console.log('  --verbose, -v     Show detailed type information');
+  console.log('  --help, -h        Show this help message');
+  console.log('');
+  console.log('Examples:');
+  console.log('  npx tsx scripts/infer.ts src/app.js');
+  console.log('  npx tsx scripts/infer.ts src/app.js --format=dts > app.d.ts');
+  console.log('  npx tsx scripts/infer.ts src/app.js --format=inline');
+}
+
+// ============================================================================
+// Run
+// ============================================================================
 
 main();

@@ -51,6 +51,22 @@ import {
  *
  * Maintains the typing environment and accumulated constraints
  */
+/**
+ * Global binding collector - shared across all scopes
+ */
+class GlobalBindingCollector {
+  /** All bindings from all scopes, keyed by scope-qualified name */
+  public allBindings: Map<string, PolyScheme> = new Map();
+
+  /** Scope depth for qualification */
+  private scopeCounter: number = 0;
+
+  /** Get next scope ID */
+  nextScope(): number {
+    return this.scopeCounter++;
+  }
+}
+
 export class InferenceContext {
   /** Type environment: variable name -> polymorphic scheme */
   private env: Map<string, PolyScheme>;
@@ -76,6 +92,12 @@ export class InferenceContext {
   /** Label for break/continue targets */
   private loopLabels: Map<string | null, { breakType: TypeVar; continueAllowed: boolean }>;
 
+  /** Global binding collector (shared across all child contexts) */
+  private globalCollector: GlobalBindingCollector;
+
+  /** Current scope depth */
+  private scopeDepth: number;
+
   constructor(parent: InferenceContext | null = null) {
     this.env = new Map();
     this.constraints = emptyConstraintSet();
@@ -85,6 +107,8 @@ export class InferenceContext {
     this.generatorContext = parent?.generatorContext ?? false;
     this.thisType = parent?.thisType ?? null;
     this.loopLabels = parent ? new Map(parent.loopLabels) : new Map();
+    this.globalCollector = parent?.globalCollector ?? new GlobalBindingCollector();
+    this.scopeDepth = parent ? parent.scopeDepth + 1 : 0;
   }
 
   // ==========================================================================
@@ -113,6 +137,8 @@ export class InferenceContext {
    */
   bindScheme(name: string, scheme: PolyScheme): void {
     this.env.set(name, scheme);
+    // Also record in global collector (using simple name, last one wins)
+    this.globalCollector.allBindings.set(name, scheme);
   }
 
   /**
@@ -153,6 +179,13 @@ export class InferenceContext {
     }
 
     return result;
+  }
+
+  /**
+   * Get all bindings collected from all scopes (including nested functions)
+   */
+  getGlobalBindings(): Map<string, PolyScheme> {
+    return this.globalCollector.allBindings;
   }
 
   // ==========================================================================

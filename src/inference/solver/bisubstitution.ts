@@ -146,6 +146,13 @@ export function applyNegative(type: PolarType, subst: Bisubstitution): PolarType
 
 /**
  * Apply bisubstitution to a type at given polarity
+ *
+ * When a type variable has bounds at the opposite polarity, we can use them
+ * to get more precise types. Specifically:
+ * - In positive position: if we have α ≤ τ (negative bound), α represents
+ *   something that flows into τ, so we can use the concrete part of the bound.
+ * - In negative position: if we have τ ≤ α (positive bound), α represents
+ *   something that receives from τ, so we can use the concrete part of the bound.
  */
 function applyBisubst(
   type: PolarType,
@@ -157,7 +164,25 @@ function applyBisubst(
       // Look up in appropriate substitution based on polarity
       const map = polarity === '+' ? subst.positive : subst.negative;
       const replacement = map.get(type.id);
-      return replacement ?? type;
+
+      if (replacement) {
+        return replacement;
+      }
+
+      // If no replacement at current polarity, check opposite polarity
+      // and extract concrete bounds
+      const oppositeMap = polarity === '+' ? subst.negative : subst.positive;
+      const oppositeBound = oppositeMap.get(type.id);
+
+      if (oppositeBound) {
+        // Extract concrete types from the bound
+        const concrete = extractConcreteType(oppositeBound, type.id);
+        if (concrete) {
+          return concrete;
+        }
+      }
+
+      return type;
     }
 
     case 'function': {
@@ -299,6 +324,10 @@ export function eliminateUpperBound(
  * θ_{τ≤α} = [α ⊔ τ / α⁺]  (when α not free in τ)
  *
  * This means: constrain positive occurrences of α to include τ
+ *
+ * Optimization: If the bound is a concrete type (primitive, function, etc.),
+ * we can directly use it instead of creating a union with the type variable.
+ * This produces cleaner types in the output.
  */
 export function eliminateLowerBound(
   subst: Bisubstitution,
@@ -306,11 +335,70 @@ export function eliminateLowerBound(
   bound: PolarType
 ): Bisubstitution {
   const existing = subst.positive.get(varId);
+
+  // If the bound is a concrete type (not a type variable), we can use it directly
+  // when there's no existing bound
+  if (!existing && isConcreteType(bound)) {
+    return addPositive(subst, varId, bound);
+  }
+
   const newType = existing
     ? union([existing, bound])  // α ⊔ existing ⊔ bound
     : union([{ kind: 'var', id: varId, name: `τ${varId}`, level: 0 }, bound]);
 
   return addPositive(subst, varId, newType);
+}
+
+/**
+ * Check if a type is concrete (not a type variable)
+ */
+function isConcreteType(type: PolarType): boolean {
+  switch (type.kind) {
+    case 'var':
+      return false;
+    case 'union':
+      // A union is concrete if all members are concrete
+      return type.members.every(m => isConcreteType(m));
+    case 'intersection':
+      return type.members.every(m => isConcreteType(m));
+    default:
+      return true;
+  }
+}
+
+/**
+ * Extract concrete types from a bound, filtering out type variables
+ *
+ * For example, if we have bound = τ28 | instance,
+ * we extract instance (the concrete part).
+ *
+ * This is a simplification for output purposes - we prefer showing
+ * concrete types over type variables when possible.
+ */
+function extractConcreteType(bound: PolarType, varId: number): PolarType | null {
+  if (bound.kind === 'intersection') {
+    // For intersection: α ⊓ τ₁ ⊓ τ₂ -> extract concrete members
+    const concrete = bound.members.filter(m => m.kind !== 'var');
+    if (concrete.length === 0) return null;
+    if (concrete.length === 1) return concrete[0]!;
+    return intersection(concrete);
+  }
+
+  if (bound.kind === 'union') {
+    // For union: α ⊔ τ₁ ⊔ τ₂ -> extract concrete members
+    const concrete = bound.members.filter(m => m.kind !== 'var');
+    if (concrete.length === 0) return null;
+    if (concrete.length === 1) return concrete[0]!;
+    return union(concrete);
+  }
+
+  // If it's any type variable, no concrete type
+  if (bound.kind === 'var') {
+    return null;
+  }
+
+  // Otherwise, the bound is concrete
+  return bound;
 }
 
 // ============================================================================

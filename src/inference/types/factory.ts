@@ -24,7 +24,7 @@ import type {
   ParamType,
   FieldType,
 } from './polar.js';
-import { freshTypeVar as createFreshTypeVar } from './polar.js';
+import { freshTypeVar as createFreshTypeVar, substitute } from './polar.js';
 
 // ============================================================================
 // Type Variable
@@ -331,6 +331,19 @@ export function union(members: readonly PolarType[]): PolarType {
   // Remove duplicates (simple reference equality)
   const unique = [...new Set(flattened)];
 
+  // If we have concrete types mixed with type variables, prefer concrete types
+  // This is a simplification: union([var, number]) -> number (when var is unconstrained)
+  const concreteTypes = unique.filter(t => t.kind !== 'var');
+  const typeVars = unique.filter(t => t.kind === 'var');
+
+  // If we have both concrete types and type variables, check if we can simplify
+  if (concreteTypes.length > 0 && typeVars.length > 0) {
+    // Heuristic: if all concrete types are primitives of the same kind, and we have
+    // type variables, keep the union. Otherwise, if we have primitives that cover
+    // the expected domain, we can drop the type variables.
+    // For now, just keep both - the automata simplification should handle this.
+  }
+
   if (unique.length === 0) return never;
   if (unique.length === 1) return unique[0]!;
 
@@ -413,7 +426,6 @@ export function recursive(binder: TypeVar, body: PolarType): RecursiveType {
  * μα.τ → τ[μα.τ/α]
  */
 export function unfold(rec: RecursiveType): PolarType {
-  const { substitute } = require('./polar.js');
   return substitute(rec.body, rec.binder.id, rec);
 }
 

@@ -57,8 +57,11 @@ export function inferProgram(program: Program): ProgramInferenceResult {
   }
 
   // Apply substitution to get final types
+  // Use global bindings to include all scopes (including IIFE bodies)
   const finalBindings = new Map<string, PolarType>();
-  for (const [name, polyScheme] of result.bindings) {
+  const allBindings = ctx.getGlobalBindings();
+
+  for (const [name, polyScheme] of allBindings) {
     const instantiated = applyPositive(polyScheme.scheme.body, solveResult.value);
     const simplified = simplifyType(instantiated);
     finalBindings.set(name, simplified);
@@ -134,11 +137,17 @@ export function inferWithEnv(
     };
   }
 
+  // Use global bindings to include all scopes
   const finalBindings = new Map<string, PolarType>();
-  for (const [name, polyScheme] of result.bindings) {
-    const instantiated = applyPositive(polyScheme.scheme.body, solveResult.value);
-    const simplified = simplifyType(instantiated);
-    finalBindings.set(name, simplified);
+  const allBindings = ctx.getGlobalBindings();
+
+  // Remove initial env bindings from output
+  for (const [name, polyScheme] of allBindings) {
+    if (!initialEnv.has(name)) {
+      const instantiated = applyPositive(polyScheme.scheme.body, solveResult.value);
+      const simplified = simplifyType(instantiated);
+      finalBindings.set(name, simplified);
+    }
   }
 
   return {

@@ -14,7 +14,7 @@
  */
 
 import type { PolarType, TypeVar } from '../types/index.js';
-import { isTypeVar, occursIn, freeVars } from '../types/index.js';
+import { isTypeVar, occursIn, freeVars, substitute } from '../types/index.js';
 import { union, intersection, freshTypeVar } from '../types/index.js';
 import type { FlowConstraint, SourceLocation, SolveResult, SolveError } from './constraint.js';
 import { success, failure, fail } from './constraint.js';
@@ -95,12 +95,24 @@ export class BiunificationContext {
       return success([]);
     }
 
-    // Rule: α⁺ ≤ τ⁻ (variable on left)
+    // Rule: α⁺ ≤ β⁻ (two different type variables)
+    // This creates a flow from α to β, so:
+    // - α gets an upper bound (β)
+    // - β gets a lower bound (α)
+    if (isTypeVar(pos) && isTypeVar(neg)) {
+      // Give α an upper bound
+      this.subst = eliminateUpperBound(this.subst, pos.id, neg);
+      // Give β a lower bound
+      this.subst = eliminateLowerBound(this.subst, neg.id, pos);
+      return success([]);
+    }
+
+    // Rule: α⁺ ≤ τ⁻ (variable on left, concrete on right)
     if (isTypeVar(pos)) {
       return this.eliminateLower(pos, neg, source);
     }
 
-    // Rule: τ⁺ ≤ α⁻ (variable on right)
+    // Rule: τ⁺ ≤ α⁻ (concrete on left, variable on right)
     if (isTypeVar(neg)) {
       return this.eliminateUpper(pos, neg, source);
     }
@@ -165,14 +177,12 @@ export class BiunificationContext {
 
     // Rule: μα.τ⁺ ≤ τ⁻ → τ⁺[μα.τ⁺/α] ≤ τ⁻ (unfold left)
     if (pos.kind === 'recursive') {
-      const { substitute } = require('../types/polar.js');
       const unfolded = substitute(pos.body, pos.binder.id, pos);
       return success([{ kind: 'flow', positive: unfolded, negative: neg, source }]);
     }
 
     // Rule: τ⁺ ≤ μα.τ⁻ → τ⁺ ≤ τ⁻[μα.τ⁻/α] (unfold right)
     if (neg.kind === 'recursive') {
-      const { substitute } = require('../types/polar.js');
       const unfolded = substitute(neg.body, neg.binder.id, neg);
       return success([{ kind: 'flow', positive: pos, negative: unfolded, source }]);
     }
@@ -349,8 +359,9 @@ export class BiunificationContext {
   }
 
   /**
-   * Eliminate lower bound constraint: τ⁺ ≤ α⁻
+   * Eliminate constraint: τ⁺ ≤ α⁻ (type flows into variable)
    *
+   * This gives α a lower bound: α must accept τ.
    * Apply θ_{τ≤α} = [α ⊔ τ / α⁺]
    */
   private eliminateUpper(
@@ -362,23 +373,23 @@ export class BiunificationContext {
     if (occursIn(neg.id, pos)) {
       // Need to create recursive type
       const beta = freshTypeVar();
-      const { substitute } = require('../types/polar.js');
       const newType = {
         kind: 'recursive' as const,
         binder: beta,
         body: substitute(pos, neg.id, beta),
       };
-      this.subst = eliminateUpperBound(this.subst, neg.id, newType);
+      this.subst = eliminateLowerBound(this.subst, neg.id, newType);
     } else {
-      this.subst = eliminateUpperBound(this.subst, neg.id, pos);
+      this.subst = eliminateLowerBound(this.subst, neg.id, pos);
     }
 
     return success([]);
   }
 
   /**
-   * Eliminate upper bound constraint: α⁺ ≤ τ⁻
+   * Eliminate constraint: α⁺ ≤ τ⁻ (variable flows into type)
    *
+   * This gives α an upper bound: α cannot produce more than τ.
    * Apply θ_{α≤τ} = [α ⊓ τ / α⁻]
    */
   private eliminateLower(
@@ -390,15 +401,14 @@ export class BiunificationContext {
     if (occursIn(pos.id, neg)) {
       // Need to create recursive type
       const beta = freshTypeVar();
-      const { substitute } = require('../types/polar.js');
       const newType = {
         kind: 'recursive' as const,
         binder: beta,
         body: substitute(neg, pos.id, beta),
       };
-      this.subst = eliminateLowerBound(this.subst, pos.id, newType);
+      this.subst = eliminateUpperBound(this.subst, pos.id, newType);
     } else {
-      this.subst = eliminateLowerBound(this.subst, pos.id, neg);
+      this.subst = eliminateUpperBound(this.subst, pos.id, neg);
     }
 
     return success([]);

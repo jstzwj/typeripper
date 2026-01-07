@@ -1,13 +1,18 @@
 /**
- * Output module exports
+ * Output module exports - MLsub PolarType formatters
  */
 
 export {
-  formatType,
-  formatAsInlineComments,
-  formatAsJSON,
-  formatAsDTS,
-  formatAsReport,
+  typeToTypeScript,
+  formatReport,
+  formatJSON,
+  formatDTS,
+  formatInline,
 } from './formatter.js';
 
-export type { FormatOptions } from './formatter.js';
+export type {
+  FormatOptions,
+  InferredBinding,
+  InferenceError,
+  ProgramInferenceResult,
+} from './formatter.js';

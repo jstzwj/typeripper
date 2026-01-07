@@ -15,6 +15,7 @@
 
 import type { PolarType, TypeVar } from './polar.js';
 import { freeVars, substitute, freshTypeVar, typeEquals } from './polar.js';
+import { intersection } from './factory.js';
 
 // ============================================================================
 // Typing Scheme
@@ -287,8 +288,6 @@ export function mergeDelta(
 
     if (t1 && t2) {
       // Both have this variable: intersect the types
-      // Import dynamically to avoid circular dependency
-      const { intersection } = require('./factory.js');
       result.set(name, intersection([t1, t2]));
     } else if (t1) {
       result.set(name, t1);
