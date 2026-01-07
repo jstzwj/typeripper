@@ -80,7 +80,12 @@ function transferVariableDeclaration(
 
   for (const decl of node.declarations) {
     if (t.isIdentifier(decl.id)) {
-      const initType = decl.init ? inferExpression(decl.init, currentState, ctx) : Types.undefined;
+      let initType = decl.init ? inferExpression(decl.init, currentState, ctx) : Types.undefined;
+
+      // Check if this variable is modified inside a loop - if so, widen it
+      if (ctx.modifiedInLoops.has(decl.id.name)) {
+        initType = Types.widen(initType);
+      }
 
       // Check if this is a hoisted var - might need to widen type
       const hoisted = ctx.hoistedDeclarations.get(decl.id.name);

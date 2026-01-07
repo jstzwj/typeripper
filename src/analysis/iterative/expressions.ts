@@ -358,6 +358,18 @@ export function inferFunctionType(
 }
 
 /**
+ * Collect variables that are modified inside loops for top-level code
+ * Returns a set of variable names that need to be widened
+ */
+export function collectModifiedInLoopsTopLevel(statements: t.Statement[]): Set<string> {
+  const modified = new Set<string>();
+  for (const stmt of statements) {
+    collectModifiedInLoops(stmt, modified, false);
+  }
+  return modified;
+}
+
+/**
  * Collect variables that are modified inside loops (compound assignment, ++, --)
  * These need to be widened to their base types for soundness.
  */
@@ -385,8 +397,9 @@ function collectModifiedInLoops(
   } else if (t.isExpressionStatement(node)) {
     collectModifiedInLoops(node.expression, modified, insideLoop);
   } else if (t.isAssignmentExpression(node)) {
-    // Check for compound assignment (+=, -=, etc.) inside a loop
-    if (insideLoop && node.operator !== '=' && t.isIdentifier(node.left)) {
+    // Check for any assignment inside a loop - even simple assignment (=)
+    // needs to be tracked because the variable may take different values
+    if (insideLoop && t.isIdentifier(node.left)) {
       modified.add(node.left.name);
     }
     // Also check the right side for nested assignments
@@ -711,6 +724,18 @@ function collectReturnTypes(
     if (node.finalizer) {
       collectReturnTypes(node.finalizer, types, state, ctx);
     }
+  } else if (t.isWhileStatement(node) || t.isDoWhileStatement(node)) {
+    // Handle return statements inside while/do-while loops
+    collectReturnTypes(node.body, types, state, ctx);
+  } else if (t.isForStatement(node)) {
+    // Handle return statements inside for loops
+    collectReturnTypes(node.body, types, state, ctx);
+  } else if (t.isForInStatement(node) || t.isForOfStatement(node)) {
+    // Handle return statements inside for-in/for-of loops
+    collectReturnTypes(node.body, types, state, ctx);
+  } else if (t.isLabeledStatement(node)) {
+    // Handle labeled statements
+    collectReturnTypes(node.body, types, state, ctx);
   }
 }
 

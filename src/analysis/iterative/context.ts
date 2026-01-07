@@ -41,6 +41,8 @@ export interface IterativeContext {
   globalEnv: TypeEnvironment;
   /** Hoisted declarations (collected in first pass) */
   hoistedDeclarations: Map<string, HoistedDeclaration>;
+  /** Variables that are modified inside loops (need widening) */
+  modifiedInLoops: Set<string>;
 }
 
 /**

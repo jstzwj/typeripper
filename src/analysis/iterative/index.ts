@@ -25,7 +25,7 @@ import {
 import { narrowTypeByCondition } from './narrowing.js';
 import { addBuiltins } from './builtins.js';
 import { transfer } from './transfer.js';
-import { collectHoistedDeclarations, computeReversePostOrder } from './expressions.js';
+import { collectHoistedDeclarations, computeReversePostOrder, collectModifiedInLoopsTopLevel } from './expressions.js';
 import { formatType } from '../../output/formatter.js';
 
 // Re-export types for external use
@@ -64,6 +64,9 @@ export function inferTypesIterative(
   const hoistedDeclarations = new Map<string, HoistedDeclaration>();
   collectHoistedDeclarations(ast.program.body, hoistedDeclarations);
 
+  // Collect variables modified inside loops (for widening)
+  const modifiedInLoops = collectModifiedInLoopsTopLevel(ast.program.body);
+
   // Initialize context
   const ctx: IterativeContext = {
     cfg,
@@ -75,6 +78,7 @@ export function inferTypesIterative(
     filename,
     globalEnv,
     hoistedDeclarations,
+    modifiedInLoops,
   };
 
   // Initialize entry state with hoisted declarations
@@ -192,6 +196,9 @@ export function analyzeIterative(
   const hoistedDeclarations = new Map<string, HoistedDeclaration>();
   collectHoistedDeclarations(ast.program.body, hoistedDeclarations);
 
+  // Collect variables modified inside loops (for widening)
+  const modifiedInLoops = collectModifiedInLoopsTopLevel(ast.program.body);
+
   // Initialize context
   const ctx: IterativeContext = {
     cfg,
@@ -203,6 +210,7 @@ export function analyzeIterative(
     filename,
     globalEnv,
     hoistedDeclarations,
+    modifiedInLoops,
   };
 
   // Initialize entry state with hoisted declarations

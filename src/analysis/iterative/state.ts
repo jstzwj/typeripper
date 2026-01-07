@@ -154,9 +154,16 @@ export function joinTypes(t1: Type, t2: Type): Type {
   // Same type - no change
   if (t1.id === t2.id) return t1;
 
+  // Structurally equal types - return the first one
+  if (typesEqual(t1, t2)) return t1;
+
   // If either is unreachable (never), return the other
   if (t1.kind === 'never') return t2;
   if (t2.kind === 'never') return t1;
+
+  // If either is any, the result is any
+  if (t1.kind === 'any') return t1;
+  if (t2.kind === 'any') return t2;
 
   // If types are the same kind, try to widen to base type
   if (t1.kind === t2.kind) {
@@ -264,6 +271,57 @@ export function typesEqual(t1: Type, t2: Type): boolean {
   if (t1.kind === 'union' && t2.kind === 'union') {
     if (t1.members.length !== t2.members.length) return false;
     return t1.members.every((m1) => t2.members.some((m2) => typesEqual(m1, m2)));
+  }
+
+  // For objects, check properties
+  if (t1.kind === 'object' && t2.kind === 'object') {
+    if (t1.properties.size !== t2.properties.size) return false;
+    for (const [key, prop1] of t1.properties) {
+      const prop2 = t2.properties.get(key);
+      if (!prop2 || !typesEqual(prop1.type, prop2.type)) return false;
+    }
+    return true;
+  }
+
+  // For functions, check params and return type
+  if (t1.kind === 'function' && t2.kind === 'function') {
+    if (t1.params.length !== t2.params.length) return false;
+    if (!typesEqual(t1.returnType, t2.returnType)) return false;
+    for (let i = 0; i < t1.params.length; i++) {
+      if (!typesEqual(t1.params[i]!.type, t2.params[i]!.type)) return false;
+    }
+    return true;
+  }
+
+  // For classes, check name and instance type
+  if (t1.kind === 'class' && t2.kind === 'class') {
+    if (t1.name !== t2.name) return false;
+    return typesEqual(t1.instanceType, t2.instanceType);
+  }
+
+  // For arrays, check element type
+  if (t1.kind === 'array' && t2.kind === 'array') {
+    return typesEqual(t1.elementType, t2.elementType);
+  }
+
+  // For primitives with values (literal types)
+  if (t1.kind === 'number' && t2.kind === 'number') {
+    return (t1 as import('../../types/index.js').NumberType).value ===
+           (t2 as import('../../types/index.js').NumberType).value;
+  }
+  if (t1.kind === 'string' && t2.kind === 'string') {
+    return (t1 as import('../../types/index.js').StringType).value ===
+           (t2 as import('../../types/index.js').StringType).value;
+  }
+  if (t1.kind === 'boolean' && t2.kind === 'boolean') {
+    return (t1 as import('../../types/index.js').BooleanType).value ===
+           (t2 as import('../../types/index.js').BooleanType).value;
+  }
+
+  // For any/undefined/null/never/unknown - if same kind, they're equal
+  if (t1.kind === 'any' || t1.kind === 'undefined' || t1.kind === 'null' ||
+      t1.kind === 'never' || t1.kind === 'unknown') {
+    return true;
   }
 
   return false;

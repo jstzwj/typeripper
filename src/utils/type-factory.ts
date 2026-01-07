@@ -235,7 +235,7 @@ export const Types = {
       }
     }
 
-    // Remove duplicates by ID
+    // Remove duplicates by ID first (fast path)
     const seen = new Set<TypeId>();
     const unique: Type[] = [];
     for (const member of flattened) {
@@ -245,8 +245,23 @@ export const Types = {
       }
     }
 
+    // Remove structurally equal types (slower, but necessary for convergence)
+    const deduped: Type[] = [];
+    for (const member of unique) {
+      let isDuplicate = false;
+      for (const existing of deduped) {
+        if (Types.structurallyEqual(member, existing)) {
+          isDuplicate = true;
+          break;
+        }
+      }
+      if (!isDuplicate) {
+        deduped.push(member);
+      }
+    }
+
     // Remove never types (they don't contribute to unions)
-    const withoutNever = unique.filter((t) => t.kind !== 'never');
+    const withoutNever = deduped.filter((t) => t.kind !== 'never');
 
     if (withoutNever.length === 0) {
       return Types.never;
@@ -449,5 +464,69 @@ export const Types = {
       default:
         return false;
     }
+  },
+
+  /**
+   * Check if two types are structurally equal
+   */
+  structurallyEqual(t1: Type, t2: Type): boolean {
+    if (t1.id === t2.id) return true;
+    if (t1.kind !== t2.kind) return false;
+
+    // For unions, check if members are equal (order-independent)
+    if (t1.kind === 'union' && t2.kind === 'union') {
+      if (t1.members.length !== t2.members.length) return false;
+      return t1.members.every((m1) => t2.members.some((m2) => Types.structurallyEqual(m1, m2)));
+    }
+
+    // For objects, check properties
+    if (t1.kind === 'object' && t2.kind === 'object') {
+      if (t1.properties.size !== t2.properties.size) return false;
+      for (const [key, prop1] of t1.properties) {
+        const prop2 = t2.properties.get(key);
+        if (!prop2 || !Types.structurallyEqual(prop1.type, prop2.type)) return false;
+      }
+      return true;
+    }
+
+    // For functions, check params and return type
+    if (t1.kind === 'function' && t2.kind === 'function') {
+      if (t1.params.length !== t2.params.length) return false;
+      if (!Types.structurallyEqual(t1.returnType, t2.returnType)) return false;
+      for (let i = 0; i < t1.params.length; i++) {
+        if (!Types.structurallyEqual(t1.params[i]!.type, t2.params[i]!.type)) return false;
+      }
+      return true;
+    }
+
+    // For classes, check name and instance type
+    if (t1.kind === 'class' && t2.kind === 'class') {
+      if (t1.name !== t2.name) return false;
+      return Types.structurallyEqual(t1.instanceType, t2.instanceType);
+    }
+
+    // For arrays, check element type
+    if (t1.kind === 'array' && t2.kind === 'array') {
+      return Types.structurallyEqual(t1.elementType, t2.elementType);
+    }
+
+    // For primitives with values (literal types)
+    if (t1.kind === 'number' && t2.kind === 'number') {
+      return (t1 as NumberType).value === (t2 as NumberType).value;
+    }
+    if (t1.kind === 'string' && t2.kind === 'string') {
+      return (t1 as StringType).value === (t2 as StringType).value;
+    }
+    if (t1.kind === 'boolean' && t2.kind === 'boolean') {
+      return (t1 as BooleanType).value === (t2 as BooleanType).value;
+    }
+
+    // For any/undefined/null/never/unknown - if same kind, they're equal
+    if (t1.kind === 'any' || t1.kind === 'undefined' || t1.kind === 'null' ||
+        t1.kind === 'never' || t1.kind === 'unknown') {
+      return true;
+    }
+
+    return false;
   },
 } as const;
