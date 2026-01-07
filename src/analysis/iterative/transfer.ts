@@ -11,11 +11,9 @@ import { Types } from '../../utils/type-factory.js';
 import type { IterativeContext } from './context.js';
 import { lookupBinding, updateBinding, joinTypes } from './state.js';
 import { addAnnotation, annotateParameters } from './annotations.js';
-import {
-  inferExpression,
-  inferFunctionType,
-  inferClassType,
-} from './expressions.js';
+import { inferExpression } from './expressions.js';
+import { inferFunctionType } from './functions.js';
+import { inferClassType } from './classes.js';
 
 /**
  * Transfer function - compute exit state from entry state for a block

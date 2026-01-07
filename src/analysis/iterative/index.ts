@@ -25,8 +25,16 @@ import {
 import { narrowTypeByCondition } from './narrowing.js';
 import { addBuiltins } from './builtins.js';
 import { transfer } from './transfer.js';
-import { collectHoistedDeclarations, computeReversePostOrder, collectModifiedInLoopsTopLevel } from './expressions.js';
+import { collectHoistedDeclarations, computeReversePostOrder, collectModifiedInLoopsTopLevel } from './functions.js';
 import { formatType } from '../../output/formatter.js';
+
+// Import modules to trigger their registration with expressions.ts
+// These imports have side effects that register their implementations
+import './operators.js';
+import './members.js';
+import './calls.js';
+import './classes.js';
+import './functions.js';
 
 // Re-export types for external use
 export type { IterativeContext, HoistedDeclaration } from './context.js';
