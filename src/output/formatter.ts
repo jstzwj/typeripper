@@ -527,6 +527,8 @@ export function formatInline(result: ProgramInferenceResult, source: string): st
   const functionDeclPattern = /^(\s*)function\s+(\w+)\s*\(/;
   const arrowFuncPattern = /^(\s*)(const|let|var)\s+(\w+)\s*=\s*(\([^)]*\)|[a-zA-Z_$][a-zA-Z0-9_$]*)\s*=>/;
   const classPattern = /^(\s*)class\s+(\w+)/;
+  // Pattern for for-loop variable declarations: for (let i = 0; ...)
+  const forLoopVarPattern = /^(\s*)for\s*\(\s*(let|var|const)\s+(\w+)\s*=/;
 
   const outputLines: string[] = [];
 
@@ -542,6 +544,24 @@ export function formatInline(result: ProgramInferenceResult, source: string): st
     // Try to match different declaration patterns
     let match: RegExpMatchArray | null;
     let annotation = '';
+
+    // For-loop variable declaration
+    match = line.match(forLoopVarPattern);
+    if (match) {
+      const name = match[3]!;
+      const type = typeAnnotations.get(name);
+      if (type) {
+        annotation = ` /* : ${type} */`;
+        // Insert annotation after the variable name in the for loop
+        // Find the position after "let i" or "var i" or "const i"
+        const varDeclMatch = line.match(/(for\s*\(\s*(?:let|var|const)\s+\w+)/);
+        if (varDeclMatch) {
+          const insertPos = varDeclMatch.index! + varDeclMatch[0].length;
+          outputLines.push(line.slice(0, insertPos) + annotation + line.slice(insertPos));
+          continue;
+        }
+      }
+    }
 
     // Arrow function assignment
     match = line.match(arrowFuncPattern);

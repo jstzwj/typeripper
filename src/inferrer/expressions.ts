@@ -8,7 +8,7 @@
  */
 
 import type { Expression, Node } from '@babel/types';
-import type { PolarType, FunctionType, RecordType } from '../types/index.js';
+import type { PolarType, FunctionType, RecordType, ArrayType } from '../types/index.js';
 import {
   boolean,
   number,
@@ -553,17 +553,50 @@ function inferNewExpression(ctx: InferenceContext, expr: any): InferResult {
   const calleeResult = inferExpression(ctx, expr.callee);
   let constraints = calleeResult.constraints;
 
+  // Collect argument types for the constructor
+  const argTypes: PolarType[] = [];
   for (const arg of expr.arguments) {
     if (arg.type === 'SpreadElement') {
       const spreadResult = inferExpression(ctx, arg.argument);
       constraints = mergeConstraintSets(constraints, spreadResult.constraints);
+      argTypes.push(spreadResult.type);
     } else if (arg.type !== 'ArgumentPlaceholder') {
       const argResult = inferExpression(ctx, arg);
       constraints = mergeConstraintSets(constraints, argResult.constraints);
+      argTypes.push(argResult.type);
     }
   }
 
+  // The result type of `new` expression
   const instanceVar = ctx.fresh('instance');
+
+  // For built-in constructors with __instanceType__ (like Date),
+  // we need to check if the callee has this property
+  const instanceTypeVar = ctx.fresh('instType');
+  const constructorWithInstanceType: RecordType = {
+    kind: 'record',
+    fields: new Map([
+      ['__instanceType__', field(instanceTypeVar)],
+    ]),
+    rest: ctx.fresh('ρ'),
+  };
+
+  // Try to extract __instanceType__ from built-in constructors
+  constraints = addConstraint(
+    constraints,
+    flow(calleeResult.type, constructorWithInstanceType, nodeToSource(expr))
+  );
+
+  // __instanceType__ flows to instance (for built-in constructors)
+  constraints = addConstraint(
+    constraints,
+    flow(instanceTypeVar, instanceVar, nodeToSource(expr))
+  );
+
+  // For user-defined constructors, they set properties via `this`
+  // The instance type will be collected from the constructor body
+  // through the this-binding mechanism (handled elsewhere)
+
   return inferResult(instanceVar, constraints);
 }
 
@@ -579,11 +612,34 @@ function inferMemberExpression(ctx: InferenceContext, expr: any): InferResult {
     const propName = expr.property.name;
     const propVar = ctx.fresh(`${propName}`);
 
-    const expectedObj: RecordType = {
+    // Create a union of possible object types that can have this property:
+    // 1. A record type with the property
+    // 2. A function type with the property (for cases like func.prototype)
+    // 3. An array type with the property (for cases like arr.push)
+    // This allows records, functions, and arrays to have properties
+    const recordWithProp: RecordType = {
       kind: 'record',
       fields: new Map([[propName, field(propVar)]]),
       rest: ctx.fresh('ρ'),
     };
+
+    const funcWithProp: FunctionType = {
+      kind: 'function',
+      params: [],
+      returnType: ctx.fresh('ret'),
+      isAsync: false,
+      isGenerator: false,
+      properties: new Map([[propName, field(propVar)]]),
+    };
+
+    const arrayWithProp: ArrayType = {
+      kind: 'array',
+      elementType: ctx.fresh('elem'),
+      properties: new Map([[propName, field(propVar)]]),
+    };
+
+    // The object must be either a record with this property OR a function with this property OR an array with this property
+    const expectedObj = union([recordWithProp, funcWithProp, arrayWithProp]);
 
     constraints = addConstraint(
       constraints,

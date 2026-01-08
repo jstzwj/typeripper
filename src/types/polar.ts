@@ -98,6 +98,9 @@ export interface PrimitiveType extends PolarTypeBase {
  * Function type: τ⁻ → τ⁺
  * Domain has opposite polarity (contravariant)
  * Codomain has same polarity (covariant)
+ *
+ * Functions in JavaScript are also objects with properties (e.g., prototype, name, length).
+ * The properties field represents these object properties.
  */
 export interface FunctionType extends PolarTypeBase {
   readonly kind: 'function';
@@ -109,6 +112,8 @@ export interface FunctionType extends PolarTypeBase {
   readonly isAsync: boolean;
   /** Is this a generator function? */
   readonly isGenerator: boolean;
+  /** Properties of the function object (e.g., prototype) */
+  readonly properties?: ReadonlyMap<string, FieldType>;
 }
 
 /**
@@ -144,12 +149,17 @@ export interface FieldType {
 /**
  * Array type: Array<τ>
  * Element type has same polarity (covariant for reads)
+ *
+ * Arrays in JavaScript are also objects with methods (e.g., push, pop, map).
+ * The properties field represents these methods and properties.
  */
 export interface ArrayType extends PolarTypeBase {
   readonly kind: 'array';
   readonly elementType: PolarType;
   /** Tuple types have fixed length */
   readonly tuple?: readonly PolarType[];
+  /** Properties of the array object (e.g., push, pop, length) */
+  readonly properties?: ReadonlyMap<string, FieldType>;
 }
 
 /**

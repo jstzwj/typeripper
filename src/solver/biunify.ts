@@ -163,6 +163,29 @@ export class BiunificationContext {
       );
     }
 
+    // Rule: τ⁺ ≤ (τ₁⁻ ⊔ τ₂⁻) → try to flow to at least one member
+    // If we can flow to any member of the union, we succeed
+    if (neg.kind === 'union') {
+      // Try to decompose with each member of the union
+      const results = neg.members.map(m =>
+        this.decompose(pos, m, source)
+      );
+
+      // If any decomposition succeeds, use that one
+      const successful = results.find(r => r.ok);
+      if (successful) {
+        return successful;
+      }
+
+      // If all failed, return the first error (could be improved to return best error)
+      return results[0] ?? fail(
+        'incompatible-types',
+        `Type '${pos.kind}' does not match any member of union`,
+        source,
+        [pos, neg]
+      );
+    }
+
     // Rule: τ⁺ ≤ (τ₁⁻ ⊓ τ₂⁻) → {τ⁺ ≤ τ₁⁻, τ⁺ ≤ τ₂⁻}
     if (neg.kind === 'intersection') {
       return success(
@@ -293,6 +316,56 @@ export class BiunificationContext {
         source,
       });
 
+      // Handle function properties (covariant, same as record fields)
+      // All properties required in neg must be present in pos
+      if (neg.properties) {
+        for (const [name, negField] of neg.properties) {
+          const posField = pos.properties?.get(name);
+
+          if (!posField) {
+            // Property missing - this is OK if the function property is optional
+            // For now, we'll be permissive and allow missing properties
+            continue;
+          }
+
+          // Property exists - must flow properly
+          constraints.push({
+            kind: 'flow',
+            positive: posField.type,
+            negative: negField.type,
+            source,
+          });
+        }
+      }
+
+      return success(constraints);
+    }
+
+    // Rule: Function ≤ Record (function flowing to record expecting function properties)
+    // In JavaScript, functions are objects and can have properties.
+    // If neg is a record, check if pos (a function) has the required properties.
+    if (pos.kind === 'function' && neg.kind === 'record') {
+      const constraints: FlowConstraint[] = [];
+
+      // Check that all required fields in neg are present in pos.properties
+      for (const [name, negField] of neg.fields) {
+        const posField = pos.properties?.get(name);
+
+        if (!posField) {
+          // Property not found in function - this is OK, allow missing properties
+          // The constraint will be satisfied through the rest variable
+          continue;
+        }
+
+        // Property found - must flow properly
+        constraints.push({
+          kind: 'flow',
+          positive: posField.type,
+          negative: negField.type,
+          source,
+        });
+      }
+
       return success(constraints);
     }
 
@@ -358,6 +431,39 @@ export class BiunificationContext {
             kind: 'flow',
             positive: pos.tuple[i]!,
             negative: neg.tuple[i]!,
+            source,
+          });
+        }
+      }
+
+      // Handle array properties (covariant, same as record fields)
+      // All properties required in neg must be present in pos
+      if (neg.properties) {
+        for (const [name, negField] of neg.properties) {
+          const posField = pos.properties?.get(name);
+
+          if (!posField) {
+            // Property missing in pos - check for built-in array properties
+            // Arrays have built-in 'length: number' property
+            if (name === 'length') {
+              // length property: flow number to the expected type
+              constraints.push({
+                kind: 'flow',
+                positive: { kind: 'primitive', name: 'number' },
+                negative: negField.type,
+                source,
+              });
+              continue;
+            }
+            // For other missing properties, be permissive
+            continue;
+          }
+
+          // Property exists - must flow properly
+          constraints.push({
+            kind: 'flow',
+            positive: posField.type,
+            negative: negField.type,
             source,
           });
         }

@@ -369,7 +369,12 @@ function inferFunctionDeclaration(ctx: InferenceContext, stmt: any): StatementRe
     isGenerator: stmt.generator,
   };
 
-  const funcScheme = ctx.generalize(funcType);
+  // Don't generalize function types during constraint collection.
+  // Generalization should only happen after constraint solving to ensure
+  // that all constraints between functions in the same scope are properly resolved.
+  // Using monoScheme ensures that when nbody() calls energy(), they share
+  // the same type variables and constraints propagate correctly.
+  const funcScheme = monoScheme(funcType);
 
   return statementResult(
     constraints,

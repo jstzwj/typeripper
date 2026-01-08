@@ -434,7 +434,115 @@ export function createBuiltinEnvironment(): Map<string, PolyScheme> {
   env.set('SyntaxError', mono(func([param('message', string, { optional: true })], errorType)));
   env.set('RangeError', mono(func([param('message', string, { optional: true })], errorType)));
 
+  // Date constructor - returns a Date object when called with `new`
+  const dateInstanceType = record({
+    getTime: func([], number),
+    getFullYear: func([], number),
+    getMonth: func([], number),
+    getDate: func([], number),
+    getDay: func([], number),
+    getHours: func([], number),
+    getMinutes: func([], number),
+    getSeconds: func([], number),
+    getMilliseconds: func([], number),
+    getTimezoneOffset: func([], number),
+    setTime: func([param('time', number)], number),
+    setFullYear: func([param('year', number)], number),
+    setMonth: func([param('month', number)], number),
+    setDate: func([param('date', number)], number),
+    setHours: func([param('hours', number)], number),
+    setMinutes: func([param('minutes', number)], number),
+    setSeconds: func([param('seconds', number)], number),
+    setMilliseconds: func([param('ms', number)], number),
+    toISOString: func([], string),
+    toDateString: func([], string),
+    toTimeString: func([], string),
+    toLocaleDateString: func([], string),
+    toLocaleTimeString: func([], string),
+    toLocaleString: func([], string),
+    toString: func([], string),
+    valueOf: func([], number),
+  });
+  env.set('Date', mono(dateConstructorType(dateInstanceType)));
+
+  // RegExp constructor
+  const regExpInstanceType = record({
+    test: func([param('str', string)], boolean),
+    exec: func([param('str', string)], union([array(string), nullType])),
+    source: string,
+    flags: string,
+    global: boolean,
+    ignoreCase: boolean,
+    multiline: boolean,
+    lastIndex: number,
+  });
+  env.set('RegExp', mono(func([
+    param('pattern', union([string, regExpInstanceType])),
+    param('flags', string, { optional: true }),
+  ], regExpInstanceType)));
+
+  // Map constructor
+  const mapKeyVar = freshTypeVar('K');
+  const mapValueVar = freshTypeVar('V');
+  env.set('Map', mono(func(
+    [param('entries', array(array(any)), { optional: true })],
+    record({
+      get: func([param('key', mapKeyVar)], union([mapValueVar, undefined_])),
+      set: func([param('key', mapKeyVar), param('value', mapValueVar)], record({})),
+      has: func([param('key', mapKeyVar)], boolean),
+      delete: func([param('key', mapKeyVar)], boolean),
+      clear: func([], undefined_),
+      size: number,
+      forEach: func([param('callback', func([param('value', mapValueVar), param('key', mapKeyVar)], undefined_))], undefined_),
+      keys: func([], record({})),
+      values: func([], record({})),
+      entries: func([], record({})),
+    })
+  )));
+
+  // Set constructor
+  const setValueVar = freshTypeVar('T');
+  env.set('Set', mono(func(
+    [param('values', array(setValueVar), { optional: true })],
+    record({
+      add: func([param('value', setValueVar)], record({})),
+      has: func([param('value', setValueVar)], boolean),
+      delete: func([param('value', setValueVar)], boolean),
+      clear: func([], undefined_),
+      size: number,
+      forEach: func([param('callback', func([param('value', setValueVar)], undefined_))], undefined_),
+      keys: func([], record({})),
+      values: func([], record({})),
+      entries: func([], record({})),
+    })
+  )));
+
+  // Global print function (for compatibility with some JS engines)
+  env.set('print', mono(func([param('data', any, { rest: true })], undefined_)));
+
   return env;
+}
+
+/**
+ * Create the Date constructor type
+ */
+function dateConstructorType(instanceType: PolarType): PolarType {
+  return record({
+    prototype: instanceType,
+    now: func([], number),
+    parse: func([param('str', string)], number),
+    UTC: func([
+      param('year', number),
+      param('month', number, { optional: true }),
+      param('date', number, { optional: true }),
+      param('hours', number, { optional: true }),
+      param('minutes', number, { optional: true }),
+      param('seconds', number, { optional: true }),
+      param('ms', number, { optional: true }),
+    ], number),
+    // The function call type - we need to record instance type for `new` expressions
+    __instanceType__: instanceType,
+  });
 }
 
 /**

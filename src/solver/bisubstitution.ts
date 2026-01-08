@@ -27,7 +27,7 @@ import type {
   ClassType,
   FieldType,
 } from '../types/index.js';
-import { union, intersection } from '../types/index.js';
+import { union, intersection, typeEquals } from '../types/index.js';
 
 // ============================================================================
 // Bisubstitution
@@ -132,41 +132,50 @@ export function compose(s1: Bisubstitution, s2: Bisubstitution): Bisubstitution 
 
 /**
  * Apply bisubstitution to a type in positive position
+ * Iteratively applies until a fixed point is reached.
  */
 export function applyPositive(type: PolarType, subst: Bisubstitution): PolarType {
-  return applyBisubst(type, subst, '+');
+  // Use a visited set to detect cycles
+  const visited = new Set<number>();
+  return applyBisubstWithCycle(type, subst, '+', visited);
 }
 
 /**
  * Apply bisubstitution to a type in negative position
+ * Iteratively applies until a fixed point is reached.
  */
 export function applyNegative(type: PolarType, subst: Bisubstitution): PolarType {
-  return applyBisubst(type, subst, '-');
+  // Use a visited set to detect cycles
+  const visited = new Set<number>();
+  return applyBisubstWithCycle(type, subst, '-', visited);
 }
 
 /**
- * Apply bisubstitution to a type at given polarity
- *
- * When a type variable has bounds at the opposite polarity, we can use them
- * to get more precise types. Specifically:
- * - In positive position: if we have α ≤ τ (negative bound), α represents
- *   something that flows into τ, so we can use the concrete part of the bound.
- * - In negative position: if we have τ ≤ α (positive bound), α represents
- *   something that receives from τ, so we can use the concrete part of the bound.
+ * Apply bisubstitution with cycle detection
  */
-function applyBisubst(
+function applyBisubstWithCycle(
   type: PolarType,
   subst: Bisubstitution,
-  polarity: '+' | '-'
+  polarity: '+' | '-',
+  visited: Set<number>
 ): PolarType {
   switch (type.kind) {
     case 'var': {
+      // Cycle detection: if we've already visited this variable, return it as-is
+      if (visited.has(type.id)) {
+        return type;
+      }
+
       // Look up in appropriate substitution based on polarity
       const map = polarity === '+' ? subst.positive : subst.negative;
       const replacement = map.get(type.id);
 
       if (replacement) {
-        return replacement;
+        // Mark as visited before recursing
+        visited.add(type.id);
+        const result = applyBisubstWithCycle(replacement, subst, polarity, visited);
+        visited.delete(type.id);
+        return result;
       }
 
       // If no replacement at current polarity, check opposite polarity
@@ -176,7 +185,9 @@ function applyBisubst(
 
       if (oppositeBound) {
         // Extract concrete types from the bound
-        const concrete = extractConcreteType(oppositeBound, type.id);
+        visited.add(type.id);
+        const concrete = extractConcreteTypeWithCycle(oppositeBound, type.id, subst, polarity, visited);
+        visited.delete(type.id);
         if (concrete) {
           return concrete;
         }
@@ -189,13 +200,28 @@ function applyBisubst(
       // Domain: flip polarity (contravariant)
       // Codomain: same polarity (covariant)
       const oppPolarity = polarity === '+' ? '-' : '+';
+
+      // Handle properties if present
+      let newProperties: ReadonlyMap<string, FieldType> | undefined;
+      if (type.properties) {
+        const propsMap = new Map<string, FieldType>();
+        for (const [name, field] of type.properties) {
+          propsMap.set(name, {
+            ...field,
+            type: applyBisubstWithCycle(field.type, subst, polarity, visited),
+          });
+        }
+        newProperties = propsMap;
+      }
+
       return {
         ...type,
         params: type.params.map(p => ({
           ...p,
-          type: applyBisubst(p.type, subst, oppPolarity),
+          type: applyBisubstWithCycle(p.type, subst, oppPolarity, visited),
         })),
-        returnType: applyBisubst(type.returnType, subst, polarity),
+        returnType: applyBisubstWithCycle(type.returnType, subst, polarity, visited),
+        properties: newProperties,
       } as FunctionType;
     }
 
@@ -205,7 +231,7 @@ function applyBisubst(
       for (const [name, field] of type.fields) {
         newFields.set(name, {
           ...field,
-          type: applyBisubst(field.type, subst, polarity),
+          type: applyBisubstWithCycle(field.type, subst, polarity, visited),
         });
       }
       // Rest variable also substituted
@@ -226,10 +252,24 @@ function applyBisubst(
 
     case 'array': {
       // Element type: same polarity (covariant for reads)
+      // Handle properties if present
+      let newProperties: ReadonlyMap<string, FieldType> | undefined;
+      if (type.properties) {
+        const propsMap = new Map<string, FieldType>();
+        for (const [name, field] of type.properties) {
+          propsMap.set(name, {
+            ...field,
+            type: applyBisubstWithCycle(field.type, subst, polarity, visited),
+          });
+        }
+        newProperties = propsMap;
+      }
+
       return {
         ...type,
-        elementType: applyBisubst(type.elementType, subst, polarity),
-        tuple: type.tuple?.map(t => applyBisubst(t, subst, polarity)),
+        elementType: applyBisubstWithCycle(type.elementType, subst, polarity, visited),
+        tuple: type.tuple?.map(t => applyBisubstWithCycle(t, subst, polarity, visited)),
+        properties: newProperties,
       } as ArrayType;
     }
 
@@ -237,7 +277,7 @@ function applyBisubst(
       // Members: same polarity
       return {
         ...type,
-        members: type.members.map(m => applyBisubst(m, subst, polarity)),
+        members: type.members.map(m => applyBisubstWithCycle(m, subst, polarity, visited)),
       } as UnionType;
     }
 
@@ -245,16 +285,15 @@ function applyBisubst(
       // Members: same polarity
       return {
         ...type,
-        members: type.members.map(m => applyBisubst(m, subst, polarity)),
+        members: type.members.map(m => applyBisubstWithCycle(m, subst, polarity, visited)),
       } as IntersectionType;
     }
 
     case 'recursive': {
       // Body: same polarity (but don't substitute bound variable)
-      // TODO: Handle capture-avoiding substitution
       return {
         ...type,
-        body: applyBisubst(type.body, subst, polarity),
+        body: applyBisubstWithCycle(type.body, subst, polarity, visited),
       } as RecursiveType;
     }
 
@@ -262,18 +301,18 @@ function applyBisubst(
       // Resolved type: same polarity
       return {
         ...type,
-        resolvedType: applyBisubst(type.resolvedType, subst, polarity),
+        resolvedType: applyBisubstWithCycle(type.resolvedType, subst, polarity, visited),
       } as PromiseType;
     }
 
     case 'class': {
       return {
         ...type,
-        constructorType: applyBisubst(type.constructorType, subst, polarity) as FunctionType,
-        instanceType: applyBisubst(type.instanceType, subst, polarity) as RecordType,
-        staticType: applyBisubst(type.staticType, subst, polarity) as RecordType,
+        constructorType: applyBisubstWithCycle(type.constructorType, subst, polarity, visited) as FunctionType,
+        instanceType: applyBisubstWithCycle(type.instanceType, subst, polarity, visited) as RecordType,
+        staticType: applyBisubstWithCycle(type.staticType, subst, polarity, visited) as RecordType,
         superClass: type.superClass
-          ? applyBisubst(type.superClass, subst, polarity) as ClassType
+          ? applyBisubstWithCycle(type.superClass, subst, polarity, visited) as ClassType
           : null,
       } as ClassType;
     }
@@ -290,6 +329,40 @@ function applyBisubst(
     default:
       return type;
   }
+}
+
+/**
+ * Extract concrete types from a bound with cycle detection
+ */
+function extractConcreteTypeWithCycle(
+  bound: PolarType,
+  varId: number,
+  subst: Bisubstitution,
+  polarity: '+' | '-',
+  visited: Set<number>
+): PolarType | null {
+  // First apply substitution to the bound
+  const applied = applyBisubstWithCycle(bound, subst, polarity, visited);
+
+  if (applied.kind === 'intersection') {
+    const concrete = applied.members.filter(m => m.kind !== 'var');
+    if (concrete.length === 0) return null;
+    if (concrete.length === 1) return concrete[0]!;
+    return intersection(concrete);
+  }
+
+  if (applied.kind === 'union') {
+    const concrete = applied.members.filter(m => m.kind !== 'var');
+    if (concrete.length === 0) return null;
+    if (concrete.length === 1) return concrete[0]!;
+    return union(concrete);
+  }
+
+  if (applied.kind === 'var') {
+    return null;
+  }
+
+  return applied;
 }
 
 // ============================================================================
@@ -342,11 +415,27 @@ export function eliminateLowerBound(
     return addPositive(subst, varId, bound);
   }
 
-  const newType = existing
-    ? union([existing, bound])  // α ⊔ existing ⊔ bound
-    : union([{ kind: 'var', id: varId, name: `τ${varId}`, level: 0 }, bound]);
+  // If the bound is the same variable, skip (self-reference)
+  if (bound.kind === 'var' && bound.id === varId) {
+    return subst;
+  }
 
-  return addPositive(subst, varId, newType);
+  // Create union with existing bound, but don't include self-reference
+  // This avoids creating types like τ39 | τ39 | ...
+  if (existing) {
+    // Check if bound is already in existing union
+    if (existing.kind === 'union' && existing.members.some(m =>
+      m.kind === 'var' && bound.kind === 'var' && m.id === bound.id
+    )) {
+      return subst;
+    }
+    return addPositive(subst, varId, union([existing, bound]));
+  }
+
+  // When no existing bound, just use the bound directly
+  // This avoids self-referential types like τ39 | call
+  // where the resulting type still contains τ39
+  return addPositive(subst, varId, bound);
 }
 
 /**
@@ -367,41 +456,6 @@ function isConcreteType(type: PolarType): boolean {
 }
 
 /**
- * Extract concrete types from a bound, filtering out type variables
- *
- * For example, if we have bound = τ28 | instance,
- * we extract instance (the concrete part).
- *
- * This is essential for producing readable type output - we prefer showing
- * concrete types over type variables when possible.
- */
-function extractConcreteType(bound: PolarType, varId: number): PolarType | null {
-  if (bound.kind === 'intersection') {
-    // For intersection: α ⊓ τ₁ ⊓ τ₂ -> extract concrete members
-    const concrete = bound.members.filter(m => m.kind !== 'var');
-    if (concrete.length === 0) return null;
-    if (concrete.length === 1) return concrete[0]!;
-    return intersection(concrete);
-  }
-
-  if (bound.kind === 'union') {
-    // For union: α ⊔ τ₁ ⊔ τ₂ -> extract concrete members
-    const concrete = bound.members.filter(m => m.kind !== 'var');
-    if (concrete.length === 0) return null;
-    if (concrete.length === 1) return concrete[0]!;
-    return union(concrete);
-  }
-
-  // If it's any type variable, no concrete type
-  if (bound.kind === 'var') {
-    return null;
-  }
-
-  // Otherwise, the bound is concrete
-  return bound;
-}
-
-/**
  * Simplify a type by removing type variables from unions/intersections
  * where we have concrete types available, and converting unresolved
  * type variables to 'unknown' for clean output.
@@ -419,18 +473,22 @@ export function simplifyTypeForOutput(type: PolarType): PolarType {
       // First simplify all members recursively
       const simplified = type.members.map(m => simplifyTypeForOutput(m));
 
-      // Filter out unknown types if we have concrete types
-      const concrete = simplified.filter(m => m.kind !== 'unknown' && m.kind !== 'var');
-      const unknowns = simplified.filter(m => m.kind === 'unknown' || m.kind === 'var');
+      // Deduplicate using structural equality
+      const deduped = deduplicateTypes(simplified);
 
-      // If we have concrete types, prefer them over unknowns
+      // Filter out unknown types - they are redundant in unions since any concrete type is a subtype of unknown
+      const concrete = deduped.filter(m => m.kind !== 'unknown' && m.kind !== 'var');
+
+      // If we have concrete types, use them (unknown is redundant in union with concrete types)
       if (concrete.length > 0) {
-        if (concrete.length === 1) return concrete[0]!;
-        return union(concrete);
+        // Further simplify: remove function types that are `() => unknown` when we have more specific types
+        const simplified = simplifyFunctionUnion(concrete);
+        if (simplified.length === 1) return simplified[0]!;
+        return { kind: 'union', members: simplified };
       }
 
       // If only unknowns, return a single unknown
-      if (unknowns.length > 0) {
+      if (deduped.length > 0) {
         return { kind: 'unknown' };
       }
 
@@ -441,14 +499,17 @@ export function simplifyTypeForOutput(type: PolarType): PolarType {
       // First simplify all members recursively
       const simplified = type.members.map(m => simplifyTypeForOutput(m));
 
+      // Deduplicate using structural equality
+      const deduped = deduplicateTypes(simplified);
+
       // Filter out unknown types if we have concrete types
-      const concrete = simplified.filter(m => m.kind !== 'unknown' && m.kind !== 'var');
-      const unknowns = simplified.filter(m => m.kind === 'unknown' || m.kind === 'var');
+      const concrete = deduped.filter(m => m.kind !== 'unknown' && m.kind !== 'var');
+      const unknowns = deduped.filter(m => m.kind === 'unknown' || m.kind === 'var');
 
       // If we have concrete types, prefer them
       if (concrete.length > 0) {
         if (concrete.length === 1) return concrete[0]!;
-        return intersection(concrete);
+        return { kind: 'intersection', members: concrete };
       }
 
       // If only unknowns, return a single unknown
@@ -496,6 +557,94 @@ export function simplifyTypeForOutput(type: PolarType): PolarType {
     default:
       return type;
   }
+}
+
+/**
+ * Deduplicate types using structural equality
+ */
+function deduplicateTypes(types: PolarType[]): PolarType[] {
+  const result: PolarType[] = [];
+  for (const t of types) {
+    // Check if this type is structurally equal to any already added
+    if (!result.some(existing => typeEquals(existing, t))) {
+      result.push(t);
+    }
+  }
+  return result;
+}
+
+/**
+ * Simplify a union of function types by removing less specific variants.
+ * For example: `() => number | () => unknown` simplifies to `() => number`
+ * because () => number is more specific than () => unknown.
+ */
+function simplifyFunctionUnion(types: PolarType[]): PolarType[] {
+  // Separate function types from other types
+  const functions: FunctionType[] = [];
+  const others: PolarType[] = [];
+
+  for (const t of types) {
+    if (t.kind === 'function') {
+      functions.push(t);
+    } else {
+      others.push(t);
+    }
+  }
+
+  if (functions.length <= 1) {
+    return types;
+  }
+
+  // Group functions by their parameter signature (arity and param types)
+  const groups = new Map<string, FunctionType[]>();
+  for (const fn of functions) {
+    const key = functionSignatureKey(fn);
+    const existing = groups.get(key) ?? [];
+    existing.push(fn);
+    groups.set(key, existing);
+  }
+
+  // For each group, keep only the most specific function (prefer concrete return types over unknown)
+  const simplifiedFunctions: FunctionType[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      simplifiedFunctions.push(group[0]!);
+    } else {
+      // Find the most specific function - prefer concrete return types
+      const best = group.reduce((a, b) => {
+        const aUnknown = hasUnknownReturn(a);
+        const bUnknown = hasUnknownReturn(b);
+        // Prefer non-unknown return types
+        if (!aUnknown && bUnknown) return a;
+        if (aUnknown && !bUnknown) return b;
+        // If both or neither are unknown, prefer the first one (arbitrary)
+        return a;
+      });
+      simplifiedFunctions.push(best);
+    }
+  }
+
+  return [...others, ...simplifiedFunctions];
+}
+
+/**
+ * Create a key for function signature based on parameter types
+ */
+function functionSignatureKey(fn: FunctionType): string {
+  const params = fn.params.map(p => {
+    const opt = p.optional ? '?' : '';
+    const rest = p.rest ? '...' : '';
+    // Only use kind for grouping, not full type (to group by arity/structure)
+    return `${rest}${p.name}${opt}`;
+  }).join(',');
+  return `(${params})`;
+}
+
+/**
+ * Check if a function has an unknown return type
+ */
+function hasUnknownReturn(fn: FunctionType): boolean {
+  return fn.returnType.kind === 'unknown';
 }
 
 // ============================================================================
