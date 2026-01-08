@@ -213,6 +213,13 @@ export function simplifyType(type: PolarType): PolarType {
       }
     }
 
+    // Skip automaton conversion for record types
+    // Record types are already in a simplified form, and automaton conversion
+    // can lose field type information during the round-trip conversion
+    if (cleaned.kind === 'record') {
+      return cleaned;
+    }
+
     // Convert to automaton
     const automaton = typeToAutomaton(cleaned, '+');
 

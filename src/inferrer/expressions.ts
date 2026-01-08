@@ -571,26 +571,21 @@ function inferNewExpression(ctx: InferenceContext, expr: any): InferResult {
   const instanceVar = ctx.fresh('instance');
 
   // For built-in constructors with __instanceType__ (like Date),
-  // we need to check if the callee has this property
-  const instanceTypeVar = ctx.fresh('instType');
+  // directly extract __instanceType__ and use it as the instance type
+  // This avoids creating intermediate type variables that cause union types
   const constructorWithInstanceType: RecordType = {
     kind: 'record',
     fields: new Map([
-      ['__instanceType__', field(instanceTypeVar)],
+      ['__instanceType__', field(instanceVar)],
     ]),
     rest: ctx.fresh('ρ'),
   };
 
-  // Try to extract __instanceType__ from built-in constructors
+  // Extract __instanceType__ from built-in constructors
+  // This single constraint directly binds instance to the __instanceType__ field
   constraints = addConstraint(
     constraints,
     flow(calleeResult.type, constructorWithInstanceType, nodeToSource(expr))
-  );
-
-  // __instanceType__ flows to instance (for built-in constructors)
-  constraints = addConstraint(
-    constraints,
-    flow(instanceTypeVar, instanceVar, nodeToSource(expr))
   );
 
   // For user-defined constructors, they set properties via `this`
@@ -645,6 +640,32 @@ function inferMemberExpression(ctx: InferenceContext, expr: any): InferResult {
       constraints,
       flow(objResult.type, expectedObj, nodeToSource(expr))
     );
+
+    // For array properties, add constraint to flow from Array prototype
+    // This ensures that arr.length gets type number from Array.prototype.length
+    const arrayProtoScheme = ctx.lookup('Array');
+    if (arrayProtoScheme) {
+      const arrayConstructor = arrayProtoScheme.scheme.body;
+      // Extract Array.prototype from the constructor
+      if (arrayConstructor.kind === 'intersection') {
+        for (const member of arrayConstructor.members) {
+          if (member.kind === 'record') {
+            const prototypeField = member.fields.get('prototype');
+            if (prototypeField && prototypeField.type.kind === 'record') {
+              const prototype = prototypeField.type as RecordType;
+              const protoProp = prototype.fields.get(propName);
+              if (protoProp) {
+                // Flow the prototype property type to our property variable
+                constraints = addConstraint(
+                  constraints,
+                  flow(protoProp.type, propVar, nodeToSource(expr))
+                );
+              }
+            }
+          }
+        }
+      }
+    }
 
     return inferResult(propVar, constraints);
   } else {

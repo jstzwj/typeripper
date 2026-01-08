@@ -608,6 +608,15 @@ export function typeEquals(a: PolarType, b: PolarType): boolean {
 // ============================================================================
 
 /**
+ * Check if a record type represents a Date instance
+ */
+function isDateType(type: RecordType): boolean {
+  // Date has these characteristic methods
+  const dateSignature = ['getTime', 'getFullYear', 'getMonth', 'toISOString', 'valueOf'];
+  return dateSignature.every(method => type.fields.has(method));
+}
+
+/**
  * Convert a polar type to a human-readable string representation
  */
 export function typeToString(type: PolarType, seen: Set<number> = new Set()): string {
@@ -641,6 +650,13 @@ export function typeToString(type: PolarType, seen: Set<number> = new Set()): st
       if (type.fields.size === 0 && !type.rest) {
         return '{}';
       }
+
+      // Check if this is a known built-in type (like Date)
+      // by checking for characteristic fields
+      if (isDateType(type)) {
+        return 'Date';
+      }
+
       const fields = Array.from(type.fields.entries()).map(([name, field]) => {
         const opt = field.optional ? '?' : '';
         const ro = field.readonly ? 'readonly ' : '';
