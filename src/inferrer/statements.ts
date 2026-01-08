@@ -259,7 +259,6 @@ function inferPatternBindings(
               const expectedObj: RecordType = {
                 kind: 'record',
                 fields: new Map([[key, field(propType)]]),
-                rest: ctx.fresh('ρ'),
               };
               constraints = addConstraint(
                 constraints,
@@ -519,12 +518,13 @@ function inferClassDeclaration(ctx: InferenceContext, stmt: any): StatementResul
     }
   }
 
+  // Note: In MLsub lattice-based approach, inheritance is handled through
+  // intersection types rather than row variables
   const classType: RecordType = {
     kind: 'record',
     fields: new Map(
       Array.from(instanceFields.entries()).map(([name, f]) => [name, field(f.type, { optional: f.optional, readonly: f.readonly })])
     ),
-    rest: superType ? ctx.fresh('super') : null,
   };
 
   constraints = addConstraint(

@@ -215,7 +215,7 @@ function convertRecord(
   binderStates: Map<number, number>
 ): void {
   const labels = [...type.fields.keys()];
-  automaton.addHeadToState(stateId, recordHead(labels, type.rest !== null));
+  automaton.addHeadToState(stateId, recordHead(labels, false));
 
   // Field transitions (covariant)
   for (const [name, field] of type.fields) {
@@ -223,11 +223,6 @@ function convertRecord(
     const label: TransitionLabel = { kind: 'field', name };
     automaton.addTransitionToState(stateId, label, fieldState.id);
     convertType(automaton, fieldState.id, field.type, polarity, binderStates);
-  }
-
-  // Row variable (if present)
-  if (type.rest) {
-    automaton.addHeadToState(stateId, varHead(type.rest.id, type.rest.name));
   }
 }
 
@@ -476,7 +471,7 @@ function headToType(
           fields.set(fieldName, { type: fieldType, optional: false, readonly: false });
         }
       }
-      return { kind: 'record', fields, rest: null };
+      return { kind: 'record', fields };
     }
 
     case 'array': {
@@ -514,8 +509,8 @@ function headToType(
         kind: 'class',
         name: head.name,
         constructorType: { kind: 'function', params: [], returnType: { kind: 'primitive' as const, name: 'undefined' }, isAsync: false, isGenerator: false },
-        instanceType: { kind: 'record', fields: new Map(), rest: null },
-        staticType: { kind: 'record', fields: new Map(), rest: null },
+        instanceType: { kind: 'record', fields: new Map() },
+        staticType: { kind: 'record', fields: new Map() },
         superClass: null,
       };
     }

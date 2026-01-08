@@ -239,8 +239,7 @@ export function field(
  * Create a record type from an object of types
  */
 export function record(
-  fields: Record<string, PolarType | FieldType>,
-  rest: TypeVar | null = null
+  fields: Record<string, PolarType | FieldType>
 ): RecordType {
   const fieldMap = new Map<string, FieldType>();
   for (const [name, typeOrField] of Object.entries(fields)) {
@@ -253,7 +252,6 @@ export function record(
   return {
     kind: 'record',
     fields: fieldMap,
-    rest,
   };
 }
 
@@ -262,16 +260,6 @@ export function record(
  */
 export function emptyRecord(): RecordType {
   return record({});
-}
-
-/**
- * Create an open record (with row variable for extensibility)
- */
-export function openRecord(
-  fields: Record<string, PolarType | FieldType>,
-  rowVar?: TypeVar
-): RecordType {
-  return record(fields, rowVar ?? typeVar('ρ'));
 }
 
 // ============================================================================
@@ -308,8 +296,128 @@ export function tuple(elements: readonly PolarType[]): ArrayType {
 // ============================================================================
 
 /**
+ * Check if a type is a record type
+ */
+function isRecordType(t: PolarType): t is RecordType {
+  return t.kind === 'record';
+}
+
+/**
+ * Compute record join: {f} ⊔ {g} = {h} where dom(h) = dom(f) ∩ dom(g)
+ *
+ * MLsub semantics (Figure 3 from the paper):
+ * - The result contains only fields present in BOTH records
+ * - Field types are joined (union)
+ *
+ * This gives us width subtyping automatically:
+ *   {a: T, b: U} ≤ {a: T}  because {a: T, b: U} ⊔ {a: T} = {a: T}
+ */
+function recordJoin(records: RecordType[]): RecordType {
+  if (records.length === 0) return emptyRecord();
+  if (records.length === 1) return records[0]!;
+
+  // Find intersection of all field names
+  const allFieldNames = records.map(r => new Set(r.fields.keys()));
+  const commonFields = new Set(allFieldNames[0]);
+
+  for (let i = 1; i < allFieldNames.length; i++) {
+    const currentFields = allFieldNames[i]!;
+    for (const name of commonFields) {
+      if (!currentFields.has(name)) {
+        commonFields.delete(name);
+      }
+    }
+  }
+
+  // Build result with common fields, joining their types
+  const resultFields: Record<string, FieldType> = {};
+
+  for (const name of commonFields) {
+    const fieldTypes: PolarType[] = [];
+    let isOptional = false;
+    let isReadonly = true;
+
+    for (const record of records) {
+      const field = record.fields.get(name)!;
+      fieldTypes.push(field.type);
+      isOptional = isOptional || field.optional;
+      isReadonly = isReadonly && field.readonly;
+    }
+
+    resultFields[name] = {
+      type: union(fieldTypes),
+      optional: isOptional,
+      readonly: isReadonly,
+    };
+  }
+
+  return record(resultFields);
+}
+
+/**
+ * Compute record meet: {f} ⊓ {g} = {h} where dom(h) = dom(f) ∪ dom(g)
+ *
+ * MLsub semantics (Figure 3 from the paper):
+ * - The result contains fields from ALL records (union of domains)
+ * - Field types are intersected (meet)
+ * - Fields only in one record keep their original type
+ *
+ * This allows expressing "has at least these fields":
+ *   {a: T} ⊓ {b: U} = {a: T, b: U}
+ */
+function recordMeet(records: RecordType[]): RecordType {
+  if (records.length === 0) return emptyRecord();
+  if (records.length === 1) return records[0]!;
+
+  // Collect all field names (union of domains)
+  const allFieldNames = new Set<string>();
+  for (const record of records) {
+    for (const name of record.fields.keys()) {
+      allFieldNames.add(name);
+    }
+  }
+
+  // Build result with all fields
+  const resultFields: Record<string, FieldType> = {};
+
+  for (const name of allFieldNames) {
+    const fieldTypes: PolarType[] = [];
+    let isOptional = true;
+    let isReadonly = false;
+    let presentCount = 0;
+
+    for (const record of records) {
+      const field = record.fields.get(name);
+      if (field) {
+        fieldTypes.push(field.type);
+        isOptional = isOptional && field.optional;
+        isReadonly = isReadonly || field.readonly;
+        presentCount++;
+      }
+    }
+
+    // If field is only in one record, use its type directly
+    if (presentCount === 1) {
+      const originalField = records.find(r => r.fields.has(name))!.fields.get(name)!;
+      resultFields[name] = originalField;
+    } else {
+      // Field in multiple records: intersect types
+      resultFields[name] = {
+        type: intersection(fieldTypes),
+        optional: isOptional,
+        readonly: isReadonly,
+      };
+    }
+  }
+
+  return record(resultFields);
+}
+
+/**
  * Create a union type (τ⁺ ⊔ τ⁺)
  * Flattens nested unions and removes duplicates
+ *
+ * Special handling for records: implements MLsub record join semantics
  */
 export function union(members: readonly PolarType[]): PolarType {
   const flattened: PolarType[] = [];
@@ -330,6 +438,12 @@ export function union(members: readonly PolarType[]): PolarType {
 
   // Remove duplicates (simple reference equality)
   const unique = [...new Set(flattened)];
+
+  // MLsub record join: if all members are records, apply record join semantics
+  const records = unique.filter(isRecordType);
+  if (records.length > 1 && records.length === unique.length) {
+    return recordJoin(records);
+  }
 
   // If we have concrete types mixed with type variables, prefer concrete types
   // This is a simplification: union([var, number]) -> number (when var is unconstrained)
@@ -356,6 +470,8 @@ export function union(members: readonly PolarType[]): PolarType {
 /**
  * Create an intersection type (τ⁻ ⊓ τ⁻)
  * Flattens nested intersections and removes duplicates
+ *
+ * Special handling for records: implements MLsub record meet semantics
  */
 export function intersection(members: readonly PolarType[]): PolarType {
   const flattened: PolarType[] = [];
@@ -376,6 +492,12 @@ export function intersection(members: readonly PolarType[]): PolarType {
 
   // Remove duplicates
   const unique = [...new Set(flattened)];
+
+  // MLsub record meet: if all members are records, apply record meet semantics
+  const records = unique.filter(isRecordType);
+  if (records.length > 1 && records.length === unique.length) {
+    return recordMeet(records);
+  }
 
   if (unique.length === 0) return any;
   if (unique.length === 1) return unique[0]!;
@@ -514,7 +636,6 @@ export const Types = {
   field,
   record,
   emptyRecord,
-  openRecord,
 
   // Arrays
   array,

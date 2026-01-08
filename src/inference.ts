@@ -86,7 +86,6 @@ export {
   field,
   record,
   emptyRecord,
-  openRecord,
   array,
   tuple,
   union,

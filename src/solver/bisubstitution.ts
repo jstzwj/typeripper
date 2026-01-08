@@ -234,19 +234,9 @@ function applyBisubstWithCycle(
           type: applyBisubstWithCycle(field.type, subst, polarity, visited),
         });
       }
-      // Rest variable also substituted
-      let newRest = type.rest;
-      if (type.rest) {
-        const map = polarity === '+' ? subst.positive : subst.negative;
-        const replacement = map.get(type.rest.id);
-        if (replacement && replacement.kind === 'var') {
-          newRest = replacement;
-        }
-      }
       return {
         ...type,
         fields: newFields,
-        rest: newRest,
       } as RecordType;
     }
 

@@ -129,12 +129,14 @@ export interface ParamType {
 /**
  * Record type: {ℓ₁: τ₁, ℓ₂: τ₂, ...}
  * All fields have the same polarity as the record
+ *
+ * MLsub uses lattice operations (⊔/⊓) for record extensibility instead of row variables:
+ * - Join {f} ⊔ {g} = {h} where dom(h) = dom(f) ∩ dom(g)
+ * - Meet {f} ⊓ {g} = {h} where dom(h) = dom(f) ∪ dom(g)
  */
 export interface RecordType extends PolarTypeBase {
   readonly kind: 'record';
   readonly fields: ReadonlyMap<string, FieldType>;
-  /** Row variable for open records (extensibility) */
-  readonly rest: TypeVar | null;
 }
 
 /**
@@ -369,9 +371,6 @@ export function freeVars(type: PolarType): Set<number> {
         for (const field of t.fields.values()) {
           collect(field.type, bound);
         }
-        if (t.rest && !bound.has(t.rest.id)) {
-          result.add(t.rest.id);
-        }
         break;
 
       case 'array':
@@ -464,7 +463,6 @@ export function substitute(
         return {
           ...t,
           fields: newFields,
-          rest: t.rest && t.rest.id === varId ? null : t.rest,
         };
       }
 
@@ -549,8 +547,7 @@ export function typeEquals(a: PolarType, b: PolarType): boolean {
         const bField = br.fields.get(name);
         if (!bField || !typeEquals(field.type, bField.type)) return false;
       }
-      if (a.rest && br.rest) return a.rest.id === br.rest.id;
-      return a.rest === null && br.rest === null;
+      return true;
     }
 
     case 'array': {
@@ -647,7 +644,7 @@ export function typeToString(type: PolarType, seen: Set<number> = new Set()): st
     }
 
     case 'record': {
-      if (type.fields.size === 0 && !type.rest) {
+      if (type.fields.size === 0) {
         return '{}';
       }
 
@@ -662,9 +659,7 @@ export function typeToString(type: PolarType, seen: Set<number> = new Set()): st
         const ro = field.readonly ? 'readonly ' : '';
         return `${ro}${name}${opt}: ${typeToString(field.type, seen)}`;
       });
-      const rest = type.rest ? `...${type.rest.name}` : null;
-      const allFields = rest ? [...fields, rest] : fields;
-      return `{ ${allFields.join(', ')} }`;
+      return `{ ${fields.join(', ')} }`;
     }
 
     case 'array':

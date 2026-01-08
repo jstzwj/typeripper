@@ -173,7 +173,7 @@ function formatRecordTS(
   seen: Set<number>
 ): string {
   if (type.fields.size === 0) {
-    return type.rest ? 'Record<string, unknown>' : '{}';
+    return '{}';
   }
 
   const fields = Array.from(type.fields.entries()).map(([name, field]) => {

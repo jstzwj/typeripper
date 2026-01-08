@@ -98,6 +98,15 @@ export class InferenceContext {
   /** Current scope depth */
   private scopeDepth: number;
 
+  /**
+   * Member access cache: object path -> property -> type variable
+   * This ensures that multiple accesses to the same property path
+   * share the same type variable, enabling proper constraint propagation.
+   *
+   * Example: this.head.next accessed multiple times should share the same TypeVar
+   */
+  private memberCache: Map<string, Map<string, TypeVar>>;
+
   constructor(parent: InferenceContext | null = null) {
     this.env = new Map();
     this.constraints = emptyConstraintSet();
@@ -109,6 +118,7 @@ export class InferenceContext {
     this.loopLabels = parent ? new Map(parent.loopLabels) : new Map();
     this.globalCollector = parent?.globalCollector ?? new GlobalBindingCollector();
     this.scopeDepth = parent ? parent.scopeDepth + 1 : 0;
+    this.memberCache = parent?.memberCache ?? new Map();
   }
 
   // ==========================================================================
@@ -226,6 +236,61 @@ export class InferenceContext {
    */
   mergeConstraintSet(cs: ConstraintSet): void {
     this.constraints = mergeConstraintSets(this.constraints, cs);
+  }
+
+  // ==========================================================================
+  // Member Access Cache
+  // ==========================================================================
+
+  /**
+   * Get or create a cached type variable for a member access path.
+   * This ensures that accessing the same property on the same object
+   * multiple times returns the same type variable.
+   *
+   * @param objectPath - String representation of the object (e.g., "this.head")
+   * @param propertyName - Name of the property (e.g., "next")
+   * @returns The cached or newly created type variable for this member access
+   */
+  getCachedMemberVar(objectPath: string, propertyName: string): TypeVar {
+    let objectCache = this.memberCache.get(objectPath);
+    if (!objectCache) {
+      objectCache = new Map();
+      this.memberCache.set(objectPath, objectCache);
+    }
+
+    let propVar = objectCache.get(propertyName);
+    if (!propVar) {
+      propVar = this.fresh(`${propertyName}`);
+      objectCache.set(propertyName, propVar);
+    }
+
+    return propVar;
+  }
+
+  /**
+   * Try to build a stable path string from an expression.
+   * Returns null if the expression is too complex to cache.
+   */
+  getStablePath(expr: any): string | null {
+    if (!expr) return null;
+
+    if (expr.type === 'ThisExpression') {
+      return 'this';
+    }
+
+    if (expr.type === 'Identifier') {
+      return expr.name;
+    }
+
+    if (expr.type === 'MemberExpression' && !expr.computed && expr.property?.type === 'Identifier') {
+      const objectPath = this.getStablePath(expr.object);
+      if (objectPath) {
+        return `${objectPath}.${expr.property.name}`;
+      }
+    }
+
+    // For complex expressions, don't cache
+    return null;
   }
 
   // ==========================================================================

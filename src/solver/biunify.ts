@@ -231,7 +231,6 @@ export class BiunificationContext {
           const mergedRecord: RecordType = {
             kind: 'record',
             fields: mergedFields,
-            rest: null,
           };
           return success([{
             kind: 'flow' as const,
@@ -391,17 +390,6 @@ export class BiunificationContext {
           kind: 'flow',
           positive: posField.type,
           negative: negField.type,
-          source,
-        });
-      }
-
-      // Handle row variables (open records)
-      if (neg.rest && pos.rest) {
-        // Both open: row variables must be compatible
-        constraints.push({
-          kind: 'flow',
-          positive: pos.rest,
-          negative: neg.rest,
           source,
         });
       }

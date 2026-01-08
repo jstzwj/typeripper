@@ -275,7 +275,17 @@ function inferObjectExpression(ctx: InferenceContext, expr: any): InferResult {
       if (key && prop.value?.type !== 'AssignmentPattern') {
         const valueResult = inferExpression(ctx, prop.value);
         constraints = mergeConstraintSets(constraints, valueResult.constraints);
-        fields.set(key, { type: valueResult.type, optional: false, readonly: false });
+
+        // For null-initialized fields, allow future assignment of richer types
+        // This enables circular references like: { self: null }; obj.self = obj;
+        let fieldType = valueResult.type;
+        if (valueResult.type.kind === 'primitive' &&
+            (valueResult.type.name === 'null' || valueResult.type.name === 'undefined')) {
+          // Create union with fresh type variable to allow later assignments
+          fieldType = union([valueResult.type, ctx.fresh(`${key}_val`)]);
+        }
+
+        fields.set(key, { type: fieldType, optional: false, readonly: false });
       } else if (key && prop.value?.type === 'AssignmentPattern') {
         const defaultResult = inferExpression(ctx, prop.value.right);
         constraints = mergeConstraintSets(constraints, defaultResult.constraints);
@@ -289,11 +299,11 @@ function inferObjectExpression(ctx: InferenceContext, expr: any): InferResult {
     fieldMap.set(name, field(f.type, { optional: f.optional, readonly: f.readonly }));
   }
 
-  const rest = hasSpread ? ctx.fresh('ρ') : null;
+  // Note: spreads are currently ignored in MLsub lattice-based approach
+  // Extension is handled through intersection types instead
   const recordType: RecordType = {
     kind: 'record',
     fields: fieldMap,
-    rest,
   };
 
   return inferResult(recordType, constraints);
@@ -578,7 +588,6 @@ function inferNewExpression(ctx: InferenceContext, expr: any): InferResult {
     fields: new Map([
       ['__instanceType__', field(instanceVar)],
     ]),
-    rest: ctx.fresh('ρ'),
   };
 
   // Extract __instanceType__ from built-in constructors
@@ -605,7 +614,13 @@ function inferMemberExpression(ctx: InferenceContext, expr: any): InferResult {
 
   if (!expr.computed && expr.property?.type === 'Identifier') {
     const propName = expr.property.name;
-    const propVar = ctx.fresh(`${propName}`);
+
+    // Try to use cached type variable for stable paths
+    // This ensures multiple accesses to the same property share the same type variable
+    const objectPath = ctx.getStablePath(expr.object);
+    const propVar = objectPath
+      ? ctx.getCachedMemberVar(objectPath, propName)
+      : ctx.fresh(`${propName}`);
 
     // Create a union of possible object types that can have this property:
     // 1. A record type with the property
@@ -615,7 +630,6 @@ function inferMemberExpression(ctx: InferenceContext, expr: any): InferResult {
     const recordWithProp: RecordType = {
       kind: 'record',
       fields: new Map([[propName, field(propVar)]]),
-      rest: ctx.fresh('ρ'),
     };
 
     const funcWithProp: FunctionType = {
