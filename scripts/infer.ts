@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from '../src/parser/index.js';
-import { inferTypes, analyzeIterative } from '../src/analysis/index.js';
+import { analyzeIterative } from '../src/analysis/index.js';
 import {
   formatAsReport,
   formatAsInlineComments,
@@ -26,22 +26,18 @@ function main() {
     console.log('  --format=json     Machine-readable JSON output');
     console.log('  --format=dts      TypeScript declaration file format');
     console.log('  --format=inline   Source code with inline type comments');
-    console.log('  --simple          Use simple single-pass analysis (default: iterative)');
-    console.log('  --verbose         Show CFG statistics (iterative mode only)');
+    console.log('  --verbose         Show CFG statistics');
     process.exit(1);
   }
 
   // Parse arguments
   let filePath = '';
   let format = 'report';
-  let useSimple = false;
   let verbose = false;
 
   for (const arg of args) {
     if (arg.startsWith('--format=')) {
       format = arg.slice('--format='.length);
-    } else if (arg === '--simple') {
-      useSimple = true;
     } else if (arg === '--verbose') {
       verbose = true;
     } else if (!arg.startsWith('-')) {
@@ -79,24 +75,16 @@ function main() {
 
   // Run type inference
   const startTime = Date.now();
-  let result;
+  console.error('Running iterative type inference...');
+  const result = analyzeIterative(ast, source, filePath);
 
-  if (useSimple) {
-    console.error('Running simple (single-pass) type inference...');
-    result = inferTypes(ast, source, filePath);
-  } else {
-    console.error('Running iterative type inference...');
-    const iterResult = analyzeIterative(ast, source, filePath);
-    result = iterResult;
-
-    if (verbose) {
-      console.error('');
-      console.error('CFG Statistics:');
-      console.error(`  Blocks: ${iterResult.cfg.blocks.size}`);
-      console.error(`  Edges: ${iterResult.cfg.edges.size}`);
-      console.error(`  Back edges (loops): ${iterResult.cfg.backEdges.size}`);
-      console.error(`  Iterations to converge: ${iterResult.iterations}`);
-    }
+  if (verbose) {
+    console.error('');
+    console.error('CFG Statistics:');
+    console.error(`  Blocks: ${result.cfg.blocks.size}`);
+    console.error(`  Edges: ${result.cfg.edges.size}`);
+    console.error(`  Back edges (loops): ${result.cfg.backEdges.size}`);
+    console.error(`  Iterations to converge: ${result.iterations}`);
   }
 
   const elapsed = Date.now() - startTime;
